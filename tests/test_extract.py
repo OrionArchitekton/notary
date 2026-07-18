@@ -101,3 +101,19 @@ def test_malformed_predicate_is_dropped():
         llm=_CannedLLM(canned),
     )
     assert claims == []
+
+
+def test_predicate_value_must_be_entailed_by_the_text():
+    """Cycle-3 regression: quoting a real sentence while inventing the unit
+    must not survive extraction."""
+    canned = (
+        '[{"claim_type": "unit_scale", '
+        '"text": "Session duration in milliseconds.", '
+        '"predicate": {"unit": "USD"}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:x",
+        descriptions={"duration_ms": "Session duration in milliseconds."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []

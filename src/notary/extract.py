@@ -165,9 +165,20 @@ def _grounded(item: dict, description: str) -> bool:
     return isinstance(text, str) and bool(text.strip()) and text in description
 
 
-def _predicate_ok(claim_type: ClaimType, predicate) -> bool:
+def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
     if not isinstance(predicate, dict):
         return False
+    # Semantic entailment for string-valued predicates (review finding: a
+    # completion can quote a real sentence but invent the predicate value):
+    # the stated unit/cadence must literally appear in the claimed sentence.
+    if claim_type is ClaimType.UNIT_SCALE:
+        unit = predicate.get("unit")
+        if not isinstance(unit, str) or unit.upper() not in text.upper():
+            return False
+    if claim_type is ClaimType.FRESHNESS:
+        cadence = predicate.get("cadence")
+        if not isinstance(cadence, str) or cadence.lower() not in text.lower():
+            return False
     if claim_type is ClaimType.DOMAIN_ENUM:
         values = predicate.get("values")
         has_enum = isinstance(values, list) and all(
@@ -213,7 +224,7 @@ def extract_claims(
             predicate = item.get("predicate", {})
             if not _grounded(item, description):
                 continue
-            if not _predicate_ok(claim_type, predicate):
+            if not _predicate_ok(claim_type, predicate, str(item.get("text", ""))):
                 continue
             claims.append(
                 Claim(

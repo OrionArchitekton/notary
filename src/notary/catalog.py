@@ -245,6 +245,13 @@ class NotaryWriter:
                 if doc_urn:
                     doc_urns.append(doc_urn)
 
+            # Ledger requires every dossier to have landed with a locatable
+            # urn (review finding: an authoritative verdict must never cite
+            # missing or partial evidence).
+            if not all(d["ok"] for d in receipt["documents"]):
+                receipt["ledger"] = False
+                receipt["ledger_blocked_reason"] = "dossier write failed"
+                return receipt
             dossier_part = "; ".join(doc_urns) if doc_urns else "no dossiers"
             evidence_value = f"{verdict_summary} | {dossier_part}"
             res = await session.call_tool(
