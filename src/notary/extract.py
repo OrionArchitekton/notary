@@ -69,7 +69,18 @@ class ReplayLLM:
                 f"no captured completion for prompt key {p.stem} "
                 f"(user prompt starts: {user[:80]!r})"
             )
-        return json.loads(p.read_text())["completion"]
+        record = json.loads(p.read_text())
+        # Cycle-3 adversarial fix: bind the fixture to its prompt, not just
+        # its filename. A fixture copied under another prompt's key would
+        # otherwise silently supply the wrong completion and change the
+        # published table.
+        if record.get("user") != user:
+            raise ValueError(
+                f"fixture {p.name} does not match the requesting prompt: "
+                f"stored user prompt differs (file moved or copied under the "
+                f"wrong key?)"
+            )
+        return record["completion"]
 
 
 class AnthropicLLM:

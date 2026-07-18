@@ -155,3 +155,22 @@ def test_percent_unit_without_stated_range_is_dropped():
         llm=_CannedLLM(canned),
     )
     assert claims == []
+
+
+def test_replay_fixture_must_match_its_prompt(tmp_path):
+    """Cycle-3 adversarial regression (HIGH): a fixture file placed under the
+    wrong prompt-key filename must not silently supply its completion. The
+    stored user prompt is verified against the requesting prompt."""
+    import json as _json
+
+    import pytest as _pytest
+
+    from notary.extract import SYSTEM_PROMPT, ReplayLLM, _prompt_key
+
+    key = _prompt_key(SYSTEM_PROMPT, "prompt A")
+    (tmp_path / f"{key}.json").write_text(
+        _json.dumps({"completion": "[]", "user": "prompt B", "meta": {}})
+    )
+    llm = ReplayLLM(tmp_path)
+    with _pytest.raises(ValueError, match="prompt"):
+        llm.complete(SYSTEM_PROMPT, "prompt A")

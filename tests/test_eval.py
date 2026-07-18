@@ -141,8 +141,15 @@ def test_extraction_failure_is_isolated_and_reported(warehouse):
 
     blocked = by_key[("dim_customers", "country_code")]
     assert blocked.extraction_error  # recorded, not swallowed
-    assert blocked.outcome == "clean"  # control + no verdict = fail-closed
+    # cycle-3 adversarial regression (MEDIUM): an unextracted CONTROL is
+    # UNSCORED, not clean; counting it as clean would advertise a false
+    # "0 false positives across N controls" for a control never adjudicated
+    assert blocked.outcome == "unscored"
     assert not blocked.findings
+    totals = report.totals()
+    assert totals["unscored"] == 1
+    assert totals["controls"] == 4  # scored controls only
+    assert "unscored" in report.to_markdown().lower()
 
     # neighbours in the same table are unaffected
     assert by_key[("dim_customers", "email")].outcome == "missed"

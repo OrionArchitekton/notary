@@ -31,15 +31,19 @@ from notary.types import ClaimType, Finding, Verdict
 
 _URN_TEMPLATE = "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.{table},PROD)"
 
-# Entry outcomes. A planted lie is either caught (some claim on its field was
-# CONTRADICTED) or missed - a wrong CONFIRMED, an UNVERIFIABLE, and a claim
-# the extraction gates dropped all count as missed, because in every one of
-# those cases the lie survives in the catalog. A truthful control either
-# trips a false positive (CONTRADICTED) or stays clean.
+# Entry outcomes. A planted lie is either caught (a CONTRADICTED finding
+# matching the planted claim) or missed - a wrong CONFIRMED, an UNVERIFIABLE,
+# a gate-dropped claim, and an extraction failure all count as missed,
+# because in every one of those cases the lie survives in the catalog. A
+# truthful control either trips a false positive (CONTRADICTED) or stays
+# clean; a control whose extraction FAILED is UNSCORED (cycle-3 adversarial
+# finding: counting it as clean would advertise a false-positive rate over
+# controls that were never adjudicated).
 CAUGHT = "caught"
 MISSED = "missed"
 FALSE_POSITIVE = "false_positive"
 CLEAN = "clean"
+UNSCORED = "unscored"
 
 
 @dataclass(frozen=True)
@@ -85,7 +89,13 @@ def score_entry(entry: CatalogEntry, findings: tuple[Finding, ...],
         if f.verdict is Verdict.CONTRADICTED and not _matches_planted(f)
     )
     if entry.planted_lie:
+        # fail-closed on the catch rate: an extraction failure means the lie
+        # survived, so it counts as missed
         outcome = CAUGHT if on_target else MISSED
+    elif extraction_error is not None:
+        # a control that was never extracted proves nothing about the false
+        # positive rate; excluded from the controls denominator
+        outcome = UNSCORED
     else:
         outcome = FALSE_POSITIVE if (on_target or off_target) else CLEAN
     return EntryResult(
@@ -97,32 +107,38 @@ def score_entry(entry: CatalogEntry, findings: tuple[Finding, ...],
     )
 
 
+def _tally(counts: dict[str, int], r: EntryResult) -> None:
+    """Fold one entry into a counts dict. An unscored entry (an unextracted
+    control) is counted only in 'unscored', never in the controls
+    denominator: it proves nothing about the false-positive rate."""
+    if r.outcome == UNSCORED:
+        counts["unscored"] += 1
+        return
+    counts["lies" if r.entry.planted_lie else "controls"] += 1
+    key = {CAUGHT: "caught", MISSED: "missed",
+           FALSE_POSITIVE: "false_positives", CLEAN: "clean"}[r.outcome]
+    counts[key] += 1
+
+
 @dataclass(frozen=True)
 class EvalReport:
     entries: tuple[EntryResult, ...]
 
     def totals(self) -> dict[str, int]:
         t = {"lies": 0, "controls": 0, "caught": 0, "missed": 0,
-             "false_positives": 0, "clean": 0}
+             "false_positives": 0, "clean": 0, "unscored": 0}
         for r in self.entries:
-            t["lies" if r.entry.planted_lie else "controls"] += 1
-            key = {CAUGHT: "caught", MISSED: "missed",
-                   FALSE_POSITIVE: "false_positives", CLEAN: "clean"}[r.outcome]
-            t[key] += 1
+            _tally(t, r)
         return t
 
     def rows(self) -> dict[ClaimType, dict[str, int]]:
         rows = {
             ct: {"lies": 0, "controls": 0, "caught": 0, "missed": 0,
-                 "false_positives": 0, "clean": 0}
+                 "false_positives": 0, "clean": 0, "unscored": 0}
             for ct in ClaimType
         }
         for r in self.entries:
-            row = rows[r.entry.claim_type]
-            row["lies" if r.entry.planted_lie else "controls"] += 1
-            key = {CAUGHT: "caught", MISSED: "missed",
-                   FALSE_POSITIVE: "false_positives", CLEAN: "clean"}[r.outcome]
-            row[key] += 1
+            _tally(rows[r.entry.claim_type], r)
         return rows
 
     def to_markdown(self) -> str:
@@ -148,8 +164,9 @@ class EvalReport:
             lines.append("")
             lines.append(
                 f"{len(errored)} of {len(self.entries)} entries had no "
-                f"extraction ({names}); scored fail-closed "
-                f"(lie counts as missed, control counts as clean), not verified."
+                f"extraction ({names}); scored fail-closed: a lie counts as "
+                f"missed, a control is unscored and excluded from the "
+                f"controls and false-positive columns. Not verified."
             )
         # controls' off-target contradictions are already visible as false
         # positives in the table; the invisible case is a lie entry's

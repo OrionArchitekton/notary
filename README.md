@@ -45,11 +45,11 @@ uv venv && uv pip install -e '.[dev]'   # or: pip install -e '.[dev]'
 | unit_scale | 4 | 1 | 3 | 2 | 0 |
 | freshness | 2 | 0 | 2 | 0 | 0 |
 | completeness | 3 | 0 | 3 | 0 | 0 |
-| domain_enum | 2 | 0 | 2 | 3 | 0 |
+| domain_enum | 2 | 0 | 2 | 2 | 0 |
 | deprecation_usage | 1 | 0 | 1 | 0 | 0 |
-| **total** | 12 | 1 | 11 | 5 | 0 |
+| **total** | 12 | 1 | 11 | 4 | 0 |
 
-1 of 17 entries had no extraction (dim_customers.country_code); scored fail-closed (lie counts as missed, control counts as clean), not verified.
+1 of 17 entries had no extraction (dim_customers.country_code); scored fail-closed: a lie counts as missed, a control is unscored and excluded from the controls and false-positive columns. Not verified.
 
 This table is published verbatim, misses included. The current rubric covers
 USD unit-scale claims only: it catches the cents lie with zero false positives
@@ -58,7 +58,9 @@ rubric moves a row from missed to caught; the table is regenerated, never
 hand-edited (a test fails if the README table drifts from the command's
 output). The one unextracted entry is a provider-side content-filter block on
 that exact capture prompt (deterministic across three attempts); it is scored
-fail-closed and disclosed rather than dropped from the denominator.
+fail-closed and disclosed rather than silently dropped: the manifest carries
+5 truthful controls, and the table's controls column counts only the 4 that
+were actually adjudicated.
 
 ## Planned quick start
 
