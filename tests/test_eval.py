@@ -38,7 +38,7 @@ def warehouse(tmp_path_factory):
 _PREDICATES = {
     ("fct_payments", "amount"): {"unit": "USD"},
     ("dim_products", "price_usd"): {"unit": "USD"},
-    ("fct_orders", "discount_pct"): {"unit": "percentage"},
+    ("fct_orders", "discount_pct"): {"unit": "percent_0_100"},
     ("fct_sessions_daily", "duration_ms"): {"unit": "milliseconds"},
     ("dim_products", "weight_grams"): {"unit": "grams"},
     ("fct_refunds", "amount_cents"): {"unit": "cents"},
@@ -100,22 +100,22 @@ def test_eval_scores_manifest_against_ground_truth(warehouse):
 
     rows = report.rows()
     assert set(rows) == set(ClaimType)  # every claim type gets a row
-    # rubric reality, published honestly: USD unit rubric catches the cents
-    # lie and reports the three non-USD unit lies as MISSED; completeness,
-    # freshness, and domain_enum rubrics catch their planted lies; the
-    # deprecation lie stays an honest miss (needs query history)
+    # rubric reality, published honestly: the cents and percent unit lies
+    # are caught, the ms and grams unit lies stay honest misses (no
+    # defensible magnitude signature); completeness, freshness, domain_enum,
+    # and deprecation rubrics catch their planted lies
     us = rows[ClaimType.UNIT_SCALE]
-    assert us["caught"] == 1
-    assert us["missed"] == 3
+    assert us["caught"] == 2
+    assert us["missed"] == 2
     assert us["false_positives"] == 0
     assert rows[ClaimType.COMPLETENESS]["caught"] == 3
     assert rows[ClaimType.FRESHNESS]["caught"] == 2
     de = rows[ClaimType.DOMAIN_ENUM]
     assert de["caught"] == 2
     assert de["false_positives"] == 0
-    assert rows[ClaimType.DEPRECATION_USAGE]["missed"] == 1
-    assert totals["caught"] == 8
-    assert totals["missed"] == 4
+    assert rows[ClaimType.DEPRECATION_USAGE]["caught"] == 1
+    assert totals["caught"] == 10
+    assert totals["missed"] == 2
 
     # per-entry outcomes for the known S1 pair
     by_key = {(r.entry.table, r.entry.column): r for r in report.entries}

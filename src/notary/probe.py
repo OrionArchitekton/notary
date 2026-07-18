@@ -42,9 +42,14 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
         # LIMIT bounds the rows READ, so the null filter sits OUTSIDE the
         # bounded subquery (cycle-3 finding: filtering first scans a sparse
         # table until it finds SCAN_LIMIT non-null values)
+        # centi_integer_share: share of values that are exact multiples of
+        # 0.01 (a 0-1-confined column of round percentages divided by 100
+        # is the stored-as-fraction signature for percent claims)
         sql = (
             f'select median(v) as median, '
             f'avg(case when v = floor(v) then 1.0 else 0.0 end) as integer_share, '
+            f'avg(case when v * 100 = floor(v * 100) then 1.0 else 0.0 end) '
+            f'as centi_integer_share, '
             f'min(v) as min, max(v) as max, count(*) as row_count, '
             f'{SCAN_LIMIT} as scan_limit '
             f'from (select "{col}" as v from "{table}" limit {SCAN_LIMIT}) '
@@ -54,7 +59,8 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
             claim=claim,
             sql=sql,
             measure_keys=(
-                "median", "integer_share", "min", "max", "row_count", "scan_limit"
+                "median", "integer_share", "centi_integer_share",
+                "min", "max", "row_count", "scan_limit",
             ),
         )
     if claim.claim_type is ClaimType.COMPLETENESS and claim.field_path:
@@ -117,6 +123,29 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
                     "prefix_rows", "scan_limit",
                 ),
             )
+    if (
+        claim.claim_type is ClaimType.DEPRECATION_USAGE
+        and claim.predicate.get("deprecated") is True
+        and as_of is not None
+    ):
+        # recent usage window anchored to as_of (never the wall clock);
+        # a warehouse without a query_log errors into UNVERIFIABLE
+        date.fromisoformat(as_of)  # defensive: literal goes into SQL
+        sql = (
+            f"select count(*) as recent_queries, "
+            f"count(distinct query_user) as distinct_users, "
+            f"{SCAN_LIMIT} as scan_limit "
+            f"from (select query_user from query_log "
+            f"where table_name = '{table}' "
+            f"and queried_at >= (date '{as_of}' - interval 29 day) "
+            f"limit {SCAN_LIMIT})"
+        )
+        return ProbeSpec(
+            claim=claim,
+            sql=sql,
+            measure_keys=("recent_queries", "distinct_users", "scan_limit"),
+            as_of=as_of,
+        )
     if (
         claim.claim_type is ClaimType.FRESHNESS
         and isinstance(claim.predicate.get("cadence"), str)

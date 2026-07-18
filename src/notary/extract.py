@@ -300,6 +300,15 @@ def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
             if not stated:
                 return False
         return has_bound
+    if claim_type is ClaimType.DEPRECATION_USAGE:
+        deprecated = predicate.get("deprecated")
+        if not isinstance(deprecated, bool):
+            return False
+        # entailment: a deprecated:true predicate must be stated by
+        # deprecation language, not fabricated onto ordinary text
+        if deprecated is True and "deprecat" not in text.lower():
+            return False
+        return True
     return all(
         isinstance(predicate.get(key), typ)
         for key, typ in _PREDICATE_SHAPES[claim_type]

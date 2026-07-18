@@ -337,3 +337,19 @@ def test_open_set_enum_wording_is_not_entailed():
         llm=_CannedLLM(canned2),
     )
     assert len(claims2) == 1
+
+
+def test_fabricated_deprecated_predicate_is_dropped():
+    """Deprecation entailment: deprecated:true must be stated by deprecation
+    language in the quoted sentence, not fabricated onto ordinary text."""
+    canned = (
+        '[{"claim_type": "deprecation_usage", '
+        '"text": "Order history table.", '
+        '"predicate": {"deprecated": true}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+        descriptions={None: "Order history table."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []

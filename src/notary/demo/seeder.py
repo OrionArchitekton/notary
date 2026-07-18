@@ -285,6 +285,24 @@ def _seed_legacy_orders(con: duckdb.DuckDBPyConnection, rng: random.Random) -> N
         "total_cents bigint)"
     )
     _bulk_insert(con, "legacy_orders_v1", rows)
+    # query history: the deprecation lie's ground truth. The "no longer
+    # used" table sees ~3 reads a day for the 30 days up to ANCHOR_DATE.
+    users = ["ana", "bo", "chen", "dee", "eli"]
+    log_rows = []
+    anchor = date.fromisoformat(ANCHOR_DATE)
+    for day_offset in range(30):
+        day = anchor - timedelta(days=day_offset)
+        for q in range(3):
+            log_rows.append((
+                "legacy_orders_v1",
+                f"{day.isoformat()} {8 + q * 4:02d}:15:00",
+                rng.choice(users),
+            ))
+    con.execute(
+        "create table query_log (table_name varchar, queried_at timestamp, "
+        "query_user varchar)"
+    )
+    _bulk_insert(con, "query_log", log_rows)
 
 
 def _seed_inventory(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:

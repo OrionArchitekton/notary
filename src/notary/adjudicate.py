@@ -51,12 +51,89 @@ def adjudicate(claim: Claim, result: ProbeResult) -> Finding:
         return _adjudicate_freshness(claim, result)
     if claim.claim_type is ClaimType.DOMAIN_ENUM:
         return _adjudicate_domain_enum(claim, result)
+    if claim.claim_type is ClaimType.DEPRECATION_USAGE:
+        return _adjudicate_deprecation(claim, result)
     return _unverifiable_no_rubric(claim, result)
+
+
+# Percent (0-100 scale) rubric: the stored-as-fraction signature is values
+# CONFINED to [0, 1] where EVERY value times 100 lands on an integer (round
+# percentages divided by 100), with at least two distinct magnitudes.
+# Genuinely tiny continuous percentages fail centi-integrality and fall to
+# UNVERIFIABLE. Known documented limitation: a column of round SUB-1-percent
+# values stored as true percents matches the signature.
+_PERCENT_RUBRIC_TEXT = (
+    "CONTRADICTED iff 0 <= min and max <= 1 and centi_integer_share == 1.0 "
+    "and max > min; CONFIRMED iff 0 <= min, median > 1, and max <= 100; "
+    "otherwise UNVERIFIABLE"
+)
+
+
+def _adjudicate_percent(claim: Claim, result: ProbeResult) -> Finding:
+    m = result.measurements
+    row_count = m.get("row_count") or 0
+    if not row_count or m.get("median") is None or m.get("integer_share") is None:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence={"row_count": int(row_count), "probe_sql": result.spec.sql},
+            rationale="no non-null values to measure; refusing to guess",
+        )
+    centi_share = m.get("centi_integer_share")
+    if centi_share is None:
+        return _unverifiable_no_rubric(claim, result)
+    centi_share = float(centi_share)
+    lo, hi = float(m["min"]), float(m["max"])
+    median = float(m["median"])
+    evidence = {
+        "unit_claimed": "percent_0_100",
+        "median": median,
+        "min": lo,
+        "max": hi,
+        "centi_integer_share": centi_share,
+        "row_count": int(row_count),
+        "probe_sql": result.spec.sql,
+        "rubric": _PERCENT_RUBRIC_TEXT,
+    }
+    if 0.0 <= lo and hi <= 1.0 and centi_share == 1.0 and hi > lo:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.CONTRADICTED,
+            evidence=evidence,
+            rationale=(
+                f"described as a 0-to-100 percent but every value in "
+                f"[{lo:.3f}, {hi:.3f}] is a round percentage divided by "
+                f"100; consistent with a stored 0-to-1 fraction, not a "
+                f"percentage"
+            ),
+        )
+    if 0.0 <= lo and median > 1.0 and hi <= 100.0:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.CONFIRMED,
+            evidence=evidence,
+            rationale=(
+                f"value distribution matches a 0-to-100 percent: median "
+                f"{median:.2f} with max {hi:.2f}"
+            ),
+        )
+    return Finding(
+        claim=claim,
+        verdict=Verdict.UNVERIFIABLE,
+        evidence=evidence,
+        rationale=(
+            f"distribution (median {median:.4f}, range [{lo:.4f}, "
+            f"{hi:.4f}]) matches neither the fraction signature nor the "
+            f"percent scale; refusing to guess"
+        ),
+    )
 
 
 def _adjudicate_unit_scale(claim: Claim, result: ProbeResult) -> Finding:
     unit = str(claim.predicate.get("unit", "")).upper()
     m = result.measurements
+    if unit == "PERCENT_0_100" and m:
+        return _adjudicate_percent(claim, result)
     if unit != "USD" or not m:
         return _unverifiable_no_rubric(claim, result)
 
@@ -324,6 +401,67 @@ def _adjudicate_domain_enum(claim: Claim, result: ProbeResult) -> Finding:
             ),
         )
     return _unverifiable_no_rubric(claim, result)
+
+
+# Deprecation rubric: "no longer used" is contradicted by material recent
+# query activity in the 30-day window before the anchor, and confirmed by a
+# literally empty window (measured over a complete, bounded scan).
+_RECENT_QUERY_CONTRADICTION_FLOOR = 10
+
+_DEPRECATION_RUBRIC_TEXT = (
+    f"over the 30 days before as_of: CONTRADICTED iff recent_queries >= "
+    f"{_RECENT_QUERY_CONTRADICTION_FLOOR}; CONFIRMED iff recent_queries == "
+    f"0; otherwise UNVERIFIABLE"
+)
+
+
+def _adjudicate_deprecation(claim: Claim, result: ProbeResult) -> Finding:
+    if claim.predicate.get("deprecated") is not True:
+        return _unverifiable_no_rubric(claim, result)
+    m = result.measurements
+    if m.get("recent_queries") is None:
+        return _unverifiable_no_rubric(claim, result)
+    recent = int(m["recent_queries"])
+    scan_limit = int(m.get("scan_limit") or 0)
+    evidence = {
+        "recent_queries": recent,
+        "distinct_users": int(m.get("distinct_users") or 0),
+        "as_of": result.spec.as_of,
+        "scan_limit": scan_limit,
+        "probe_sql": result.spec.sql,
+        "rubric": _DEPRECATION_RUBRIC_TEXT,
+    }
+    if recent >= _RECENT_QUERY_CONTRADICTION_FLOOR:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.CONTRADICTED,
+            evidence=evidence,
+            rationale=(
+                f"described as no longer used but the query log shows "
+                f"{recent} reads by {evidence['distinct_users']} user(s) in "
+                f"the 30 days before {result.spec.as_of}"
+            ),
+        )
+    if recent == 0:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.CONFIRMED,
+            evidence=evidence,
+            rationale=(
+                f"no queries in the 30 days before {result.spec.as_of}; "
+                f"consistent with the deprecation claim"
+            ),
+        )
+    return Finding(
+        claim=claim,
+        verdict=Verdict.UNVERIFIABLE,
+        evidence=evidence,
+        rationale=(
+            f"{recent} recent query(ies) sits between silence and the "
+            f"contradiction floor ({_RECENT_QUERY_CONTRADICTION_FLOOR}); "
+            f"refusing to guess"
+        ),
+    )
 
 
 # Cadence rubric bands, in days of staleness measured against the probe's
