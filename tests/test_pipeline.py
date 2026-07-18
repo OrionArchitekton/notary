@@ -114,3 +114,14 @@ def test_evidence_carries_probe_sql(warehouse):
     claim = _claim("fct_payments", "amount", "Transaction amount in USD.", "USD")
     finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
     assert "fct_payments" in finding.evidence["probe_sql"]
+
+
+def test_probe_scan_is_bounded(warehouse):
+    """Pipeline-review regression (FR3/FR11): probe SQL carries an explicit
+    row bound and records it in the measurements."""
+    claim = _claim("fct_payments", "amount", "Transaction amount in USD.", "USD")
+    spec = plan_probe(claim)
+    assert "limit" in spec.sql.lower()
+    result = run_probe(spec, warehouse)
+    assert result.measurements["scan_limit"] > 0
+    assert result.measurements["row_count"] <= result.measurements["scan_limit"]

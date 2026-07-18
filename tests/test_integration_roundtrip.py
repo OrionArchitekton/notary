@@ -23,6 +23,7 @@ from notary.catalog import (
     NotaryWriter,
     ensure_trust_properties,
     ingest_manifest,
+    read_descriptions,
 )
 from notary.demo.seeder import DEFAULT_SEED, build_warehouse
 from notary.extract import ReplayLLM, extract_claims
@@ -50,12 +51,37 @@ if not _gms_alive():
     pytest.skip("no local DataHub quickstart on :8080", allow_module_level=True)
 
 
+def _reset_editable_description(urn: str, field: str, text: str) -> None:
+    """Idempotency guard: a prior run's Notary correction lives in the
+    editable overlay; reset it so each run reads the original planted lie."""
+    q = json.dumps({
+        "query": "mutation($input: DescriptionUpdateInput!) "
+                 "{ updateDescription(input: $input) }",
+        "variables": {"input": {
+            "description": text,
+            "resourceUrn": urn,
+            "subResource": field,
+            "subResourceType": "DATASET_FIELD",
+        }},
+    }).encode()
+    req = urllib.request.Request(
+        f"{GMS}/api/graphql", data=q,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        payload = json.loads(r.read())
+    assert not payload.get("errors"), payload
+
+
 @pytest.fixture(scope="module")
 def ingested(tmp_path_factory):
     db = tmp_path_factory.mktemp("wh") / "fiction_retail.duckdb"
     manifest = build_warehouse(db, seed=DEFAULT_SEED)
     ensure_trust_properties(GMS)
     urns = ingest_manifest(db, manifest, GMS)
+    _reset_editable_description(
+        PAYMENTS_URN, "amount", "Transaction amount in USD."
+    )
     return db, manifest, urns
 
 
@@ -68,9 +94,13 @@ def test_s1_round_trip_writes_verdict_back(ingested, monkeypatch):
     db, _, _ = ingested
     monkeypatch.setenv(NOTARY_RUN_DATE_ENV, "2026-07-18")
 
+    # Read the description from the catalog itself (review finding FR0: the
+    # loop must consume what DataHub actually says, not a hard-coded copy).
+    catalog_descriptions = read_descriptions(GMS, PAYMENTS_URN)
+    assert catalog_descriptions.get("amount") == "Transaction amount in USD."
     claims = extract_claims(
         asset_urn=PAYMENTS_URN,
-        descriptions={"amount": "Transaction amount in USD."},
+        descriptions={"amount": catalog_descriptions["amount"]},
         llm=ReplayLLM("tests/fixtures/llm"),
     )
     con = duckdb.connect(str(db), read_only=True)

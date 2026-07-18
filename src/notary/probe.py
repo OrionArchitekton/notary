@@ -12,7 +12,11 @@ import duckdb
 
 from notary.types import Claim, ClaimType, ProbeResult, ProbeSpec
 
-_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+
+# Bounded scan (spec: Safety): probes measure at most this many non-null rows.
+# Recorded in the evidence so a reader knows when measurements are partial.
+SCAN_LIMIT = 100_000
 
 
 def _urn_table(asset_urn: str) -> str:
@@ -32,16 +36,19 @@ def plan_probe(claim: Claim) -> ProbeSpec:
         if not _IDENT.match(col):
             raise ValueError(f"unsafe column identifier: {col!r}")
         sql = (
-            f'select median("{col}") as median, '
-            f'avg(case when "{col}" = floor("{col}") then 1.0 else 0.0 end) as integer_share, '
-            f'min("{col}") as min, max("{col}") as max, '
-            f'count(*) as row_count '
-            f'from "{table}" where "{col}" is not null'
+            f'select median(v) as median, '
+            f'avg(case when v = floor(v) then 1.0 else 0.0 end) as integer_share, '
+            f'min(v) as min, max(v) as max, count(*) as row_count, '
+            f'{SCAN_LIMIT} as scan_limit '
+            f'from (select "{col}" as v from "{table}" '
+            f'where "{col}" is not null limit {SCAN_LIMIT})'
         )
         return ProbeSpec(
             claim=claim,
             sql=sql,
-            measure_keys=("median", "integer_share", "min", "max", "row_count"),
+            measure_keys=(
+                "median", "integer_share", "min", "max", "row_count", "scan_limit"
+            ),
         )
     # No probe recipe for this claim shape in v1: empty SQL drives UNVERIFIABLE.
     return ProbeSpec(claim=claim, sql="", measure_keys=())

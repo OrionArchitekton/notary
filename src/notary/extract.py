@@ -143,12 +143,57 @@ def _parse_completion(raw: str) -> list[dict]:
     return data
 
 
+# Machine-checkable predicate shapes per claim type. A completion item whose
+# predicate does not fit its declared shape is DROPPED, never probed (review
+# finding: an ungrounded or malformed claim could otherwise drive a false
+# CONTRADICTED all the way into a catalog rewrite).
+_PREDICATE_SHAPES: dict[ClaimType, tuple[tuple[str, type], ...]] = {
+    ClaimType.UNIT_SCALE: (("unit", str),),
+    ClaimType.FRESHNESS: (("cadence", str),),
+    ClaimType.COMPLETENESS: (("nullable", bool),),
+    ClaimType.DOMAIN_ENUM: (),  # values list OR numeric bound; checked below
+    ClaimType.DEPRECATION_USAGE: (("deprecated", bool),),
+}
+
+
+def _grounded(item: dict, description: str) -> bool:
+    """The claimed sentence must literally occur in the source description.
+
+    This is the anti-hallucination / anti-injection gate: the LLM can only
+    point at text the catalog actually contains, never invent a claim."""
+    text = item.get("text")
+    return isinstance(text, str) and bool(text.strip()) and text in description
+
+
+def _predicate_ok(claim_type: ClaimType, predicate) -> bool:
+    if not isinstance(predicate, dict):
+        return False
+    if claim_type is ClaimType.DOMAIN_ENUM:
+        values = predicate.get("values")
+        has_enum = isinstance(values, list) and all(
+            isinstance(v, (str, int, float)) for v in values
+        )
+        has_bound = any(
+            isinstance(predicate.get(k), (int, float)) for k in ("min", "max")
+        )
+        return has_enum or has_bound
+    return all(
+        isinstance(predicate.get(key), typ)
+        for key, typ in _PREDICATE_SHAPES[claim_type]
+    )
+
+
 def extract_claims(
     asset_urn: str,
     descriptions: dict[str | None, str],
     llm: LLMClient,
 ) -> list[Claim]:
-    """Extract typed claims from each described field (None key = table-level)."""
+    """Extract typed claims from each described field (None key = table-level).
+
+    Fail-closed filtering: only claims that are (a) a valid claim type, (b)
+    grounded verbatim in the source description, and (c) carrying a
+    well-shaped predicate survive. Everything else is dropped here so it can
+    never reach probing or write-back."""
     claims: list[Claim] = []
     for field_path, description in descriptions.items():
         raw = llm.complete(
@@ -161,13 +206,18 @@ def extract_claims(
                 raise ExtractionParseError(
                     f"bad claim_type in completion item: {item!r}"
                 ) from e
+            predicate = item.get("predicate", {})
+            if not _grounded(item, description):
+                continue
+            if not _predicate_ok(claim_type, predicate):
+                continue
             claims.append(
                 Claim(
                     asset_urn=asset_urn,
                     field_path=field_path,
                     claim_type=claim_type,
-                    text=str(item.get("text", description)),
-                    predicate=dict(item.get("predicate", {})),
+                    text=str(item["text"]),
+                    predicate=dict(predicate),
                 )
             )
     return claims

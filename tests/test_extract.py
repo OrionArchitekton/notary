@@ -62,3 +62,42 @@ def test_replay_is_strict_on_unknown_prompts(tmp_path):
             descriptions={"c": "Anything at all."},
             llm=strict,
         )
+
+
+class _CannedLLM:
+    def __init__(self, payload: str):
+        self.payload = payload
+
+    def complete(self, system: str, user: str) -> str:
+        return self.payload
+
+
+def test_ungrounded_claim_is_dropped_not_probed():
+    """Pipeline-review regression (FR1/FR4/FR12): a hallucinated or injected
+    claim whose text does not occur verbatim in the description must be
+    dropped at extraction, so it can never drive a catalog rewrite."""
+    canned = (
+        '[{"claim_type": "unit_scale", '
+        '"text": "Amount is stored in USD dollars.", '
+        '"predicate": {"unit": "USD"}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:x",
+        descriptions={"amount": "Internal ledger amount."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []
+
+
+def test_malformed_predicate_is_dropped():
+    canned = (
+        '[{"claim_type": "unit_scale", '
+        '"text": "Internal ledger amount.", '
+        '"predicate": {"unit": 42}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:x",
+        descriptions={"amount": "Internal ledger amount."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []

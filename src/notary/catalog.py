@@ -138,6 +138,47 @@ def ingest_manifest(db_path: str | Path, manifest, gms_url: str) -> list[str]:
         con.close()
 
 
+def read_descriptions(gms_url: str, asset_urn: str) -> dict[str | None, str]:
+    """Read the asset's CURRENT catalog descriptions from DataHub.
+
+    This is the read half of the loop (review finding: the round trip must
+    consume what the catalog actually says, not a hard-coded copy). Editable
+    (UI-written) field descriptions win over ingested ones; the table-level
+    description is returned under the None key."""
+    import urllib.request
+
+    query = (
+        "query($urn: String!) { dataset(urn: $urn) { "
+        "properties { description } "
+        "editableProperties { description } "
+        "schemaMetadata { fields { fieldPath description } } "
+        "editableSchemaMetadata { editableSchemaFieldInfo "
+        "{ fieldPath description } } } }"
+    )
+    payload = json.dumps({"query": query, "variables": {"urn": asset_urn}}).encode()
+    req = urllib.request.Request(
+        f"{gms_url}/api/graphql",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    ds = (data.get("data") or {}).get("dataset") or {}
+    out: dict[str | None, str] = {}
+    table_desc = ((ds.get("editableProperties") or {}).get("description")
+                  or (ds.get("properties") or {}).get("description"))
+    if table_desc:
+        out[None] = table_desc
+    for f in ((ds.get("schemaMetadata") or {}).get("fields") or []):
+        if f.get("description"):
+            out[f["fieldPath"]] = f["description"]
+    for f in ((ds.get("editableSchemaMetadata") or {})
+              .get("editableSchemaFieldInfo") or []):
+        if f.get("description"):
+            out[f["fieldPath"]] = f["description"]
+    return out
+
+
 class NotaryWriter:
     """Write an asset's Findings back to the graph through the MCP tools.
 
@@ -152,6 +193,10 @@ class NotaryWriter:
         self.gms_url = gms_url
 
     async def write_findings(self, asset_urn: str, findings: list) -> dict:
+        """Write order (review finding FR2/FR14): dossiers FIRST so the ledger
+        can reference the REAL returned document urns; ledger second; the
+        description rewrite last and only after ledger success. The pre-image
+        of every description Notary replaces is preserved in the dossier."""
         if not findings:
             return {"ledger": None, "documents": [], "descriptions": []}
         if any(f.claim.asset_urn != asset_urn for f in findings):
@@ -159,24 +204,41 @@ class NotaryWriter:
 
         run_date = _run_date()
         verdict = _aggregate_verdict(findings)
+        verdict_summary = _verdict_summary(findings)
         dossier_findings = [
             f for f in findings if f.verdict.value in ("CONTRADICTED", "CONFIRMED")
         ]
-        doc_titles = {
-            id(f): (
-                f"Notary evidence: {_short_asset(asset_urn)}."
-                f"{f.claim.field_path or '(table)'} ({run_date})"
-            )
-            for f in dossier_findings
-        }
-        evidence_value = (
-            "; ".join(doc_titles.values())
-            if doc_titles
-            else "no dossier (all UNVERIFIABLE)"
-        )
+        pre_images = read_descriptions(self.gms_url, asset_urn)
 
         receipt: dict = {"documents": [], "descriptions": []}
         async with self._session() as session:
+            doc_urns: list[str] = []
+            for f in dossier_findings:
+                title = (
+                    f"Notary evidence: {_short_asset(asset_urn)}."
+                    f"{f.claim.field_path or '(table)'} ({run_date})"
+                )
+                res = await session.call_tool(
+                    "save_document",
+                    {
+                        "document_type": "Analysis",
+                        "title": title,
+                        "content": _dossier_markdown(
+                            f, run_date,
+                            pre_image=pre_images.get(f.claim.field_path),
+                        ),
+                        "related_assets": [asset_urn],
+                    },
+                )
+                doc_urn = _extract_doc_urn(res)
+                receipt["documents"].append(
+                    {"title": title, "urn": doc_urn, "ok": not res.isError}
+                )
+                if doc_urn:
+                    doc_urns.append(doc_urn)
+
+            dossier_part = "; ".join(doc_urns) if doc_urns else "no dossiers"
+            evidence_value = f"{verdict_summary} | {dossier_part}"
             res = await session.call_tool(
                 "add_structured_properties",
                 {
@@ -190,23 +252,7 @@ class NotaryWriter:
             )
             receipt["ledger"] = not res.isError
             if res.isError:
-                # Ledger is the anchor: without it, evidence and corrected
-                # descriptions would be unattributed. Stop here.
                 return receipt
-
-            for f in dossier_findings:
-                res = await session.call_tool(
-                    "save_document",
-                    {
-                        "document_type": "Analysis",
-                        "title": doc_titles[id(f)],
-                        "content": _dossier_markdown(f, run_date),
-                        "related_assets": [asset_urn],
-                    },
-                )
-                receipt["documents"].append(
-                    {"title": doc_titles[id(f)], "ok": not res.isError}
-                )
 
             all_docs_ok = all(d["ok"] for d in receipt["documents"])
             for f in findings:
@@ -258,6 +304,33 @@ class NotaryWriter:
         return _ctx()
 
 
+def _extract_doc_urn(res) -> str | None:
+    """Parse the save_document tool result for the created document urn."""
+    if res.isError:
+        return None
+    for c in res.content:
+        text = getattr(c, "text", None)
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("urn"), str):
+            return data["urn"]
+    return None
+
+
+def _verdict_summary(findings: list) -> str:
+    """Per-claim tally so UNVERIFIABLE claims are never hidden by the
+    asset-level verdict (review finding FR15)."""
+    from collections import Counter
+
+    counts = Counter(f.verdict.value for f in findings)
+    parts = [f"{n} {v}" for v, n in sorted(counts.items())]
+    return f"{len(findings)} claims: " + ", ".join(parts)
+
+
 def _aggregate_verdict(findings: list) -> str:
     values = {f.verdict.value for f in findings}
     if "CONTRADICTED" in values:
@@ -274,7 +347,7 @@ def _short_asset(urn: str) -> str:
     return inner[-2].split(".")[-1] if len(inner) >= 2 else urn
 
 
-def _dossier_markdown(finding, run_date: str) -> str:
+def _dossier_markdown(finding, run_date: str, pre_image: str | None = None) -> str:
     claim = finding.claim
     probe_sql = finding.evidence.get("probe_sql", "(no probe SQL recorded)")
     return (
@@ -285,6 +358,8 @@ def _dossier_markdown(finding, run_date: str) -> str:
         f"- Verdict: {finding.verdict.value}\n"
         f"- Run date: {run_date}\n"
         f"- Rationale: {finding.rationale}\n\n"
+        f"## Description pre-image (before any Notary correction)\n\n"
+        f"{pre_image or '(no prior description recorded)'}\n\n"
         f"## Probe SQL\n\n```sql\n{probe_sql}\n```\n\n"
         f"## Measurements\n\n```json\n"
         f"{json.dumps(finding.evidence, indent=1, default=str)}\n```\n\n"
