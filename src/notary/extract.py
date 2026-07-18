@@ -165,6 +165,17 @@ def _grounded(item: dict, description: str) -> bool:
     return isinstance(text, str) and bool(text.strip()) and text in description
 
 
+# SYSTEM_PROMPT teaches normalized unit tokens that never occur verbatim in
+# prose (fleet-review finding: the captured discount_pct completion carries
+# "percent_0_100", which the verbatim entailment check can never match, so
+# every percent claim was silently gate-dropped). Map each normalized token
+# to the surface forms that entail it; a token not listed here still requires
+# its own verbatim occurrence, so the anti-hallucination property is kept.
+_UNIT_SURFACE_FORMS: dict[str, tuple[str, ...]] = {
+    "percent_0_100": ("percent", "%"),
+}
+
+
 def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
     if not isinstance(predicate, dict):
         return False
@@ -173,7 +184,10 @@ def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
     # the stated unit/cadence must literally appear in the claimed sentence.
     if claim_type is ClaimType.UNIT_SCALE:
         unit = predicate.get("unit")
-        if not isinstance(unit, str) or unit.upper() not in text.upper():
+        if not isinstance(unit, str):
+            return False
+        surface_forms = _UNIT_SURFACE_FORMS.get(unit.lower(), (unit,))
+        if not any(f.upper() in text.upper() for f in surface_forms):
             return False
     if claim_type is ClaimType.FRESHNESS:
         cadence = predicate.get("cadence")

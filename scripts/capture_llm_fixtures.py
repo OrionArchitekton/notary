@@ -25,9 +25,20 @@ from notary.extract import (  # noqa: E402
     SYSTEM_PROMPT,
     AnthropicLLM,
     CaptureLLM,
+    ExtractionParseError,
+    _parse_completion,
     _prompt_key,
     _user_prompt,
 )
+
+# Prompt keys the provider permanently refuses (fleet-review fix: without
+# this list a clean exit 0 is unreachable and a NEW capture failure is
+# indistinguishable by exit code from the known block).
+KNOWN_BLOCKED = {
+    # dim_customers.country_code "ISO-3166 alpha-2 country code.":
+    # content-filter 400, deterministic across 3 attempts on 2026-07-18
+    "18a856fd6bfc4054c9a7798f",
+}
 
 _URN_TEMPLATE = (
     "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.{table},PROD)"
@@ -69,24 +80,43 @@ def main() -> int:
             "note": "real completion captured for strict replay in unit tests",
         },
     )
-    captured = skipped = failed = 0
+    captured = skipped = failed = blocked = 0
     for urn, field_path, description in cases():
         user = _user_prompt(urn, field_path, description)
         key = _prompt_key(SYSTEM_PROMPT, user)
-        if (Path(args.out) / f"{key}.json").exists():
+        fixture = Path(args.out) / f"{key}.json"
+        if fixture.exists():
             skipped += 1
             continue
         label = f"{field_path or '(table)'} {description[:40]!r}"
+        if key in KNOWN_BLOCKED:
+            blocked += 1
+            print(f"skipping {label}: known provider block ({key})", flush=True)
+            continue
         print(f"capturing {label} ...", flush=True)
         try:
             raw = cap.complete(SYSTEM_PROMPT, user)
+            # Fleet-review fix: validate BEFORE the fixture is kept. A
+            # malformed completion written once would be pinned forever by
+            # the never-re-capture rule; dropping it here means the next run
+            # retries instead.
+            _parse_completion(raw)
+        except ExtractionParseError as e:
+            fixture.unlink(missing_ok=True)
+            failed += 1
+            print(f"  FAILED (unparseable, fixture discarded) {label}: {e}",
+                  flush=True)
+            continue
         except Exception as e:  # report and continue; retry the stragglers
             failed += 1
             print(f"  FAILED {label}: {e}", flush=True)
             continue
         captured += 1
         print(f"  ok: {len(raw)} chars", flush=True)
-    print(f"done: {captured} captured, {skipped} already present, {failed} failed")
+    print(
+        f"done: {captured} captured, {skipped} already present, "
+        f"{blocked} known-blocked, {failed} failed"
+    )
     return 1 if failed else 0
 
 

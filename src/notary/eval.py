@@ -9,6 +9,7 @@ highlight reel (spec S7).
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,40 @@ class EntryResult:
     # extraction drop (lie -> missed, control -> clean) but disclosed in the
     # published table so it never reads as a verified result.
     extraction_error: str | None = None
+    # CONTRADICTED findings whose claim type differs from the entry's planted
+    # claim type (fleet-review finding: without this, a future rubric's false
+    # positive against a truthful secondary sentence would be laundered into
+    # 'caught' in the wrong row). Never counted as a catch; disclosed.
+    off_type_contradictions: int = 0
+
+
+def score_entry(entry: CatalogEntry, findings: tuple[Finding, ...],
+                extraction_error: str | None = None) -> EntryResult:
+    """Pure scoring rule: a lie is caught ONLY by a CONTRADICTED finding of
+    the entry's own claim type; a control trips a false positive on ANY
+    CONTRADICTED finding (its whole description is truthful). Off-type
+    contradictions on a lie entry are disclosed, never credited."""
+    on_type = any(
+        f.verdict is Verdict.CONTRADICTED
+        and f.claim.claim_type is entry.claim_type
+        for f in findings
+    )
+    off_type = sum(
+        1 for f in findings
+        if f.verdict is Verdict.CONTRADICTED
+        and f.claim.claim_type is not entry.claim_type
+    )
+    if entry.planted_lie:
+        outcome = CAUGHT if on_type else MISSED
+    else:
+        outcome = FALSE_POSITIVE if (on_type or off_type) else CLEAN
+    return EntryResult(
+        entry=entry,
+        findings=findings,
+        outcome=outcome,
+        extraction_error=extraction_error,
+        off_type_contradictions=off_type,
+    )
 
 
 @dataclass(frozen=True)
@@ -99,6 +134,19 @@ class EvalReport:
                 f"extraction ({names}); scored fail-closed "
                 f"(lie counts as missed, control counts as clean), not verified."
             )
+        # controls' off-type contradictions are already visible as false
+        # positives in the table; the invisible case is a lie entry's
+        off_type = sum(
+            r.off_type_contradictions for r in self.entries
+            if r.entry.planted_lie
+        )
+        if off_type:
+            lines.append("")
+            lines.append(
+                f"{off_type} off-type contradiction(s) on planted-lie entries "
+                f"(a CONTRADICTED verdict whose claim type differs from the "
+                f"planted lie); disclosed here, never counted as caught."
+            )
         return "\n".join(lines)
 
 
@@ -108,6 +156,12 @@ def evaluate(
     llm: LLMClient,
 ) -> EvalReport:
     """Run the pipeline over every manifest entry and score it."""
+    untyped = [e for e in manifest.claims if e.claim_type is None]
+    if untyped:
+        names = ", ".join(f"{e.table}.{e.column or '(table)'}" for e in untyped)
+        raise ValueError(
+            f"manifest entries without a claim_type cannot be scored: {names}"
+        )
     results: list[EntryResult] = []
     for entry in manifest.claims:
         urn = _URN_TEMPLATE.format(table=entry.table)
@@ -125,19 +179,7 @@ def evaluate(
                 adjudicate(claim, run_probe(plan_probe(claim), con))
                 for claim in claims
             )
-        contradicted = any(f.verdict is Verdict.CONTRADICTED for f in findings)
-        if entry.planted_lie:
-            outcome = CAUGHT if contradicted else MISSED
-        else:
-            outcome = FALSE_POSITIVE if contradicted else CLEAN
-        results.append(
-            EntryResult(
-                entry=entry,
-                findings=findings,
-                outcome=outcome,
-                extraction_error=error,
-            )
-        )
+        results.append(score_entry(entry, findings, extraction_error=error))
     return EvalReport(entries=tuple(results))
 
 
@@ -162,15 +204,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # Fleet-review fix (fail-open exit code): a missing or empty fixtures
+    # store is a setup error, not an eval result. Without this guard the run
+    # prints a degenerate all-miss table and exits 0, which any script
+    # consuming the exit code reads as a valid evaluation.
+    fixtures = Path(args.fixtures)
+    if not fixtures.is_dir() or not any(fixtures.glob("*.json")):
+        print(
+            f"error: fixtures directory {fixtures} is missing or has no "
+            f"captured completions; run from the repo root or pass --fixtures",
+            file=sys.stderr,
+        )
+        return 2
+
     db = Path(args.db)
     db.parent.mkdir(parents=True, exist_ok=True)
     build_warehouse(db, seed=DEFAULT_SEED)
     con = duckdb.connect(str(db), read_only=True)
     try:
-        report = evaluate(MANIFEST, con, ReplayLLM(args.fixtures))
+        report = evaluate(MANIFEST, con, ReplayLLM(fixtures))
     finally:
         con.close()
     print(report.to_markdown())
+    if all(r.extraction_error for r in report.entries):
+        print(
+            "error: every entry failed extraction; the table above verified "
+            "nothing (wrong fixtures store?)",
+            file=sys.stderr,
+        )
+        return 3
     return 0
 
 

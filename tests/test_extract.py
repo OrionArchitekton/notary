@@ -117,3 +117,23 @@ def test_predicate_value_must_be_entailed_by_the_text():
         llm=_CannedLLM(canned),
     )
     assert claims == []
+
+
+def test_normalized_percent_unit_survives_entailment_gate():
+    """Fleet-review regression (A1): SYSTEM_PROMPT teaches normalized unit
+    tokens (percent_0_100) that never occur verbatim in prose, so the
+    entailment gate silently dropped every percent claim (real captured
+    fixture b2b1f38a demonstrates it). The gate must map known normalized
+    spellings to their surface forms; the claim below must survive."""
+    canned = (
+        '[{"claim_type": "unit_scale", '
+        '"text": "Discount percentage between 0 and 100.", '
+        '"predicate": {"unit": "percent_0_100"}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_orders,PROD)",
+        descriptions={"discount_pct": "Discount percentage between 0 and 100."},
+        llm=_CannedLLM(canned),
+    )
+    assert len(claims) == 1
+    assert claims[0].predicate["unit"] == "percent_0_100"

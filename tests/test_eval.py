@@ -157,6 +157,96 @@ def test_extraction_failure_is_isolated_and_reported(warehouse):
     assert "extraction" not in clean_md.lower()
 
 
+def test_off_type_contradiction_is_not_a_catch_and_is_disclosed():
+    """Fleet-review regression (confirmed WARNING, eval.py:128): a lie entry
+    is caught ONLY by a CONTRADICTED finding of the entry's own claim type.
+    An off-type CONTRADICTED (a future rubric's false positive against a
+    truthful secondary sentence) must not launder into 'caught', and must be
+    disclosed in the table."""
+    from notary.eval import EvalReport, score_entry
+    from notary.types import Claim, Finding, Verdict
+
+    entry = next(e for e in MANIFEST.claims if e.column == "discount_pct")
+    urn = "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_orders,PROD)"
+
+    def finding(claim_type):
+        return Finding(
+            claim=Claim(
+                asset_urn=urn, field_path="discount_pct", claim_type=claim_type,
+                text=entry.description, predicate={},
+            ),
+            verdict=Verdict.CONTRADICTED, evidence={}, rationale="synthetic",
+        )
+
+    off = score_entry(entry, (finding(ClaimType.DOMAIN_ENUM),))
+    assert off.outcome == "missed"  # NOT caught
+    assert off.off_type_contradictions == 1
+
+    on = score_entry(entry, (finding(ClaimType.UNIT_SCALE),))
+    assert on.outcome == "caught"
+    assert on.off_type_contradictions == 0
+
+    md = EvalReport(entries=(off,)).to_markdown()
+    assert "off-type" in md.lower()  # disclosed
+    clean_md = EvalReport(entries=(on,)).to_markdown()
+    assert "off-type" not in clean_md.lower()
+
+
+def test_untyped_manifest_entry_is_rejected_fast():
+    """Fleet-review regression (abstained A3, adjudicated inline): the seeder
+    type allows claim_type=None, but rows()/to_markdown() would KeyError(None)
+    AFTER all pipeline work. evaluate() must reject the shape up front with a
+    clear error instead of crashing at render time."""
+    from notary.demo.seeder import CatalogEntry, Manifest
+
+    untyped = CatalogEntry(
+        "dim_products", "name", "Product display name.", False, None, "n/a"
+    )
+    with pytest.raises(ValueError, match="claim_type"):
+        evaluate(Manifest(claims=(untyped,)), None, _ManifestLLM())
+
+
+def test_cli_fails_fast_on_missing_or_empty_fixtures_dir(tmp_path):
+    """Fleet-review regression (confirmed WARNING, fail-open exit code): a
+    missing or empty fixtures directory is a setup error, not an eval result.
+    The CLI must exit nonzero BEFORE printing a degenerate all-miss table."""
+    base = [sys.executable, "-m", "notary.eval", "--db", str(tmp_path / "wh.duckdb")]
+    missing = subprocess.run(
+        base + ["--fixtures", str(tmp_path / "nope")],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert missing.returncode == 2
+    assert "fixtures" in missing.stderr.lower()
+    assert "| claim type |" not in missing.stdout
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    emptied = subprocess.run(
+        base + ["--fixtures", str(empty)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert emptied.returncode == 2
+
+
+def test_cli_exits_nonzero_when_every_entry_fails_extraction(tmp_path):
+    """Companion regression: fixtures dir exists but matches no prompt, so
+    every entry errors. The table still prints (disclosed) but the process
+    signal must be failure, not success."""
+    fx = tmp_path / "fx"
+    fx.mkdir()
+    (fx / "0000000000000000000000ff.json").write_text(
+        json.dumps({"completion": "[]"})
+    )
+    r = subprocess.run(
+        [sys.executable, "-m", "notary.eval",
+         "--db", str(tmp_path / "wh.duckdb"), "--fixtures", str(fx)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert "| claim type |" in r.stdout  # still disclosed
+    assert "17 of 17" in r.stdout
+    assert r.returncode == 3
+
+
 def test_readme_table_is_the_verbatim_replay_output(tmp_path):
     """S7 slice 4: the ONE behavior this locks - the table published in the
     README is byte-for-byte what the replay run emits. A hand-edited or stale
