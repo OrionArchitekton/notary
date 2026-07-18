@@ -608,7 +608,9 @@ def test_deprecation_without_query_log_is_unverifiable(tmp_path):
 def test_deprecation_window_excludes_post_anchor_queries(tmp_path):
     """PR5 cycle-1 regression (HIGH x2): queries dated AFTER as_of must not
     count toward 'the 30 days before' it; a historical anchored run must
-    not be contradicted by later activity."""
+    not be contradicted by later activity. (With only post-anchor rows the
+    log also shows no in-window life, so the claim is UNVERIFIABLE rather
+    than CONFIRMED: cycle-2 window-liveness rule.)"""
     db = tmp_path / "later.duckdb"
     con = duckdb.connect(str(db))
     con.execute("create table old_stuff (x integer)")
@@ -636,7 +638,8 @@ def test_deprecation_window_excludes_post_anchor_queries(tmp_path):
         )
     finally:
         ro.close()
-    assert finding.verdict is Verdict.CONFIRMED  # window before as_of is silent
+    assert finding.verdict is Verdict.UNVERIFIABLE  # never CONTRADICTED
+    assert finding.evidence["recent_queries"] == 0  # later reads excluded
 
 
 def test_deprecation_probe_bounds_the_log_scan():
@@ -652,3 +655,82 @@ def test_deprecation_probe_bounds_the_log_scan():
     sql = plan_probe(claim, as_of="2026-07-18").sql.lower()
     # the table_name/date filters sit OUTSIDE the bounded subquery
     assert ") where table_name" in sql, sql
+
+
+def test_column_level_deprecation_claim_is_unverifiable(warehouse):
+    """PR5 cycle-2 regression: table-level query logs say nothing about a
+    COLUMN's usage; a column-scoped deprecation claim gets no probe recipe
+    and falls to UNVERIFIABLE instead of borrowing table evidence."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.legacy_orders_v1,PROD)",
+        field_path="total_cents",
+        claim_type=ClaimType.DEPRECATION_USAGE,
+        text="DEPRECATED column. No longer used.",
+        predicate={"deprecated": True},
+    )
+    finding = adjudicate(
+        claim, run_probe(plan_probe(claim, as_of="2026-07-18"), warehouse)
+    )
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_empty_query_log_cannot_confirm_deprecation(tmp_path):
+    """PR5 cycle-2 regression: a physically complete but EMPTY (or
+    window-dead) log proves nothing about the window; CONFIRMED requires
+    the log to show life inside the window for some table."""
+    db = tmp_path / "emptylog.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table old_stuff (x integer)")
+    con.execute(
+        "create table query_log (table_name varchar, queried_at timestamp, "
+        "query_user varchar)"
+    )
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.old_stuff,PROD)",
+            field_path=None,
+            claim_type=ClaimType.DEPRECATION_USAGE,
+            text="DEPRECATED. No longer used.",
+            predicate={"deprecated": True},
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, as_of="2026-07-18"), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_qualified_log_names_also_match(tmp_path):
+    """PR5 cycle-2 regression: logs that store schema-qualified identifiers
+    (fiction_retail.old_stuff) count toward the same asset."""
+    db = tmp_path / "quallog.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table old_stuff (x integer)")
+    con.execute(
+        "create table query_log (table_name varchar, queried_at timestamp, "
+        "query_user varchar)"
+    )
+    con.execute(
+        "insert into query_log select 'fiction_retail.old_stuff', "
+        "timestamp '2026-07-10 10:00:00' + interval (range) hour, 'ana' "
+        "from range(15)"
+    )
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.old_stuff,PROD)",
+            field_path=None,
+            claim_type=ClaimType.DEPRECATION_USAGE,
+            text="DEPRECATED. No longer used.",
+            predicate={"deprecated": True},
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, as_of="2026-07-18"), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.CONTRADICTED

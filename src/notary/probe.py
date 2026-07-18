@@ -32,6 +32,17 @@ def _urn_table(asset_urn: str) -> str:
     return name
 
 
+def _urn_dataset_name(asset_urn: str) -> str:
+    """The full dotted dataset name from the urn (identifier-checked per
+    component, safe for SQL literals)."""
+    m = re.search(r",([^,]+),[A-Z]+\)$", asset_urn)
+    name = m.group(1) if m else asset_urn
+    for part in name.split("."):
+        if not _IDENT.match(part):
+            raise ValueError(f"unsafe dataset name from urn: {name!r}")
+    return name
+
+
 def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
     """Plan the measurement SQL for a claim. Pure; never touches the DB."""
     table = _urn_table(claim.asset_urn)
@@ -126,7 +137,8 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
     if (
         claim.claim_type is ClaimType.DEPRECATION_USAGE
         and claim.predicate.get("deprecated") is True
-        and as_of is not None
+        and claim.field_path is None  # table-level logs prove nothing
+        and as_of is not None         # about a single column's usage
     ):
         # recent usage window anchored to as_of (never the wall clock),
         # bounded BELOW and ABOVE (post-anchor queries are not "the 30 days
@@ -134,24 +146,33 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
         # the bounded subquery; a warehouse without a query_log errors into
         # UNVERIFIABLE
         date.fromisoformat(as_of)  # defensive: literal goes into SQL
+        # match both bare and schema-qualified log naming conventions;
+        # window_rows_any_table proves the log was ALIVE inside the window
+        # (an empty or retention-truncated log must not read as silence)
+        window = (
+            f"queried_at >= (date '{as_of}' - interval 29 day) "
+            f"and queried_at < (date '{as_of}' + interval 1 day)"
+        )
         sql = (
             f"select count(*) as recent_queries, "
             f"count(distinct query_user) as distinct_users, "
             f"(select count(*) from (select 1 from query_log "
             f"limit {SCAN_LIMIT})) as log_rows_scanned, "
+            f"(select count(*) from (select queried_at from query_log "
+            f"limit {SCAN_LIMIT}) where {window}) as window_rows_any_table, "
             f"{SCAN_LIMIT} as scan_limit "
             f"from (select table_name, queried_at, query_user "
             f"from query_log limit {SCAN_LIMIT}) "
-            f"where table_name = '{table}' "
-            f"and queried_at >= (date '{as_of}' - interval 29 day) "
-            f"and queried_at < (date '{as_of}' + interval 1 day)"
+            f"where table_name in "
+            f"('{table}', '{_urn_dataset_name(claim.asset_urn)}') "
+            f"and {window}"
         )
         return ProbeSpec(
             claim=claim,
             sql=sql,
             measure_keys=(
                 "recent_queries", "distinct_users",
-                "log_rows_scanned", "scan_limit",
+                "log_rows_scanned", "window_rows_any_table", "scan_limit",
             ),
             as_of=as_of,
         )

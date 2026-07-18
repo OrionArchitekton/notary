@@ -447,6 +447,21 @@ def _adjudicate_deprecation(claim: Claim, result: ProbeResult) -> Finding:
             ),
         )
     log_rows_scanned = int(m.get("log_rows_scanned") or 0)
+    window_rows_any = int(m.get("window_rows_any_table") or 0)
+    evidence["window_rows_any_table"] = window_rows_any
+    if window_rows_any == 0 and recent == 0:
+        # an empty, new, or retention-truncated log shows no life inside
+        # the window; its silence proves nothing (cycle-2 finding)
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"the query log shows no activity for ANY table in the 30 "
+                f"days before {result.spec.as_of}; a dead or truncated log "
+                f"cannot confirm silence; refusing to guess"
+            ),
+        )
     if recent == 0 and scan_limit > 0 and log_rows_scanned < scan_limit:
         return Finding(
             claim=claim,

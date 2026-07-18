@@ -373,3 +373,19 @@ def test_equivalent_deprecation_wording_is_entailed():
             llm=_CannedLLM(canned),
         )
         assert len(claims) == 1, text
+
+
+def test_negated_deprecation_is_not_entailed():
+    """PR5 cycle-2 regression: 'not deprecated' states the OPPOSITE; the
+    predicate is dropped."""
+    canned = json.dumps([{
+        "claim_type": "deprecation_usage",
+        "text": "This table is not deprecated; it is actively maintained.",
+        "predicate": {"deprecated": True},
+    }])
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+        descriptions={None: "This table is not deprecated; it is actively maintained."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []

@@ -212,7 +212,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"error: the catalog's described fields "
                 f"{sorted(described_fields)} are not all present as columns "
                 f"of {table} in {db}; refusing to score this asset against "
-                f"a warehouse that does not match its schema",
+                f"a warehouse that does not match its schema. Known v1 "
+                f"limitation: an asset with ONLY a table-level description "
+                f"carries no field-level binding evidence and is refused "
+                f"here (fail-closed); use --demo for the seeded assets",
                 file=sys.stderr,
             )
             return 2
