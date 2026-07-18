@@ -16,7 +16,7 @@ from pathlib import Path
 import duckdb
 
 from notary.adjudicate import adjudicate
-from notary.demo.seeder import DEFAULT_SEED, MANIFEST, CatalogEntry, Manifest, build_warehouse
+from notary.demo.seeder import ANCHOR_DATE, DEFAULT_SEED, MANIFEST, CatalogEntry, Manifest, build_warehouse
 from notary.extract import (
     KNOWN_UNCAPTURABLE,
     SYSTEM_PROMPT,
@@ -197,8 +197,12 @@ def evaluate(
     manifest: Manifest,
     con: duckdb.DuckDBPyConnection,
     llm: LLMClient,
+    as_of: str | None = None,
 ) -> EvalReport:
-    """Run the pipeline over every manifest entry and score it."""
+    """Run the pipeline over every manifest entry and score it.
+
+    as_of anchors freshness probes (ISO date). Unanchored freshness claims
+    fall to UNVERIFIABLE; the probe never reads the wall clock."""
     untyped = [e for e in manifest.claims if e.claim_type is None]
     if untyped:
         names = ", ".join(f"{e.table}.{e.column or '(table)'}" for e in untyped)
@@ -219,7 +223,7 @@ def evaluate(
             error = f"{type(e).__name__}: {e}"
         else:
             findings = tuple(
-                adjudicate(claim, run_probe(plan_probe(claim), con))
+                adjudicate(claim, run_probe(plan_probe(claim, as_of=as_of), con))
                 for claim in claims
             )
         results.append(score_entry(entry, findings, extraction_error=error))
@@ -280,7 +284,10 @@ def main(argv: list[str] | None = None) -> int:
     build_warehouse(db, seed=DEFAULT_SEED)
     con = duckdb.connect(str(db), read_only=True)
     try:
-        report = evaluate(MANIFEST, con, ReplayLLM(fixtures))
+        # the seeded warehouse's frozen "today": freshness staleness is
+        # measured against the same anchor the data was generated around,
+        # never the wall clock, so the table is reproducible on any day
+        report = evaluate(MANIFEST, con, ReplayLLM(fixtures), as_of=ANCHOR_DATE)
     finally:
         con.close()
     print(report.to_markdown())

@@ -9,6 +9,8 @@ extractor is deleted), these tests fail rather than green-wash. Fixtures are
 real captured completions (scripts/capture_llm_fixtures.py), disclosed in
 their sidecar metadata.
 """
+import json
+
 import pytest
 
 from notary.extract import ReplayLLM, UnknownPromptError, extract_claims
@@ -174,3 +176,164 @@ def test_replay_fixture_must_match_its_prompt(tmp_path):
     llm = ReplayLLM(tmp_path)
     with _pytest.raises(ValueError, match="prompt"):
         llm.complete(SYSTEM_PROMPT, "prompt A")
+
+
+def test_fabricated_nullable_predicate_is_dropped():
+    """PR3 cycle-2 regression (Codex HIGH): a completeness predicate must be
+    entailed by the quoted sentence. Quoting a real but claim-free sentence
+    while supplying nullable:false would otherwise manufacture CONTRADICTED
+    verdicts downstream."""
+    canned = (
+        '[{"claim_type": "completeness", '
+        '"text": "Customer email address.", '
+        '"predicate": {"nullable": false}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.dim_customers,PROD)",
+        descriptions={"email": "Customer email address."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []
+
+
+def test_stated_never_null_predicate_survives():
+    """Companion: the stated forms in the seeded catalog (never null, always
+    populated, required) entail nullable:false and survive."""
+    for text in ("Never null.", "Always populated.", "Required field."):
+        canned = json.dumps([{
+            "claim_type": "completeness",
+            "text": text,
+            "predicate": {"nullable": False},
+        }])
+        claims = extract_claims(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            descriptions={"c": text},
+            llm=_CannedLLM(canned),
+        )
+        assert len(claims) == 1, text
+
+
+def test_fabricated_enum_values_are_dropped():
+    """PR3 cycle-2 regression: every claimed enum value must appear in the
+    quoted sentence; invented values are dropped."""
+    canned = (
+        '[{"claim_type": "domain_enum", '
+        '"text": "Order status, one of {placed, shipped}.", '
+        '"predicate": {"values": ["placed", "shipped", "cancelled"]}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_orders,PROD)",
+        descriptions={"status": "Order status, one of {placed, shipped}."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []
+
+
+def test_fabricated_numeric_bound_is_dropped():
+    """PR3 cycle-2 regression: a numeric bound must be stated in the quoted
+    sentence (literally, or via non-negative language for min 0)."""
+    canned = (
+        '[{"claim_type": "domain_enum", '
+        '"text": "Units on hand.", '
+        '"predicate": {"min": 0}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.stg_inventory,PROD)",
+        descriptions={"qty": "Units on hand."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []
+
+
+def test_nonnegative_language_entails_min_zero():
+    """Companion: 'Non-negative.' states min 0 and survives."""
+    canned = (
+        '[{"claim_type": "domain_enum", '
+        '"text": "Units on hand. Non-negative.", '
+        '"predicate": {"min": 0}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.stg_inventory,PROD)",
+        descriptions={"qty": "Units on hand. Non-negative."},
+        llm=_CannedLLM(canned),
+    )
+    assert len(claims) == 1
+
+
+def test_enum_value_fragments_are_not_entailed():
+    """Cycle-3 regression (Codex HIGH): entailment is token-aware; 'US' is
+    not stated by a sentence containing only 'USD'."""
+    canned = (
+        '[{"claim_type": "domain_enum", '
+        '"text": "ISO-4217 currency code, one of {USD, EUR, GBP}.", '
+        '"predicate": {"values": ["US"]}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)",
+        descriptions={"currency": "ISO-4217 currency code, one of {USD, EUR, GBP}."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []
+
+
+def test_numeric_bound_fragments_are_not_entailed():
+    """Cycle-3 regression: '5' is not stated by '50', and '2' is not stated
+    by '12'; numeric bounds match as whole tokens."""
+    for text, predicate in (
+        ("Quantity with a maximum of 50.", {"max": 5}),
+        ("Value ranges from 0 to 12.", {"min": 2}),
+    ):
+        canned = json.dumps([{
+            "claim_type": "domain_enum", "text": text, "predicate": predicate,
+        }])
+        claims = extract_claims(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            descriptions={"v": text},
+            llm=_CannedLLM(canned),
+        )
+        assert claims == [], (text, predicate)
+
+
+def test_negated_required_is_not_a_never_null_claim():
+    """Cycle-3 regression (Codex HIGH): 'not required' must not entail
+    nullable:false via the 'required' surface form."""
+    for text in ("This field is not required.", "Optional and not required."):
+        canned = json.dumps([{
+            "claim_type": "completeness", "text": text,
+            "predicate": {"nullable": False},
+        }])
+        claims = extract_claims(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            descriptions={"v": text},
+            llm=_CannedLLM(canned),
+        )
+        assert claims == [], text
+
+
+def test_open_set_enum_wording_is_not_entailed():
+    """Cycle-3 regression (adversarial HIGH): example wording ('include')
+    does not state a closed set; only closed-set phrasing (one of, must be,
+    braces) entails an enum predicate."""
+    open_text = "Currencies include USD and EUR."
+    canned = json.dumps([{
+        "claim_type": "domain_enum", "text": open_text,
+        "predicate": {"values": ["USD", "EUR"]},
+    }])
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+        descriptions={"v": open_text},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []
+
+    closed_text = "Currency, one of {USD, EUR}."
+    canned2 = json.dumps([{
+        "claim_type": "domain_enum", "text": closed_text,
+        "predicate": {"values": ["USD", "EUR"]},
+    }])
+    claims2 = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+        descriptions={"v": closed_text},
+        llm=_CannedLLM(canned2),
+    )
+    assert len(claims2) == 1

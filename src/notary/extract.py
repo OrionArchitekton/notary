@@ -199,6 +199,46 @@ _UNIT_SURFACE_FORMS: dict[str, tuple[str, ...]] = {
 # sentence must state the range or the LLM could invent it).
 _PERCENT_RANGE_RE = re.compile(r"\b0\s*(?:and|to|-)\s*100\b", re.IGNORECASE)
 
+# Stated surface forms that entail a never-null predicate / a min-of-zero
+# bound. A predicate whose value is not stated in the claimed sentence is
+# dropped, never probed. Cycle-3 hardening: matching is token-aware (plain
+# substring admitted 'US' via 'USD' and '2' via '12'), negated forms are
+# stripped before matching ('not required' must not entail never-null), and
+# an enum needs closed-set phrasing (example wording like 'include' does not
+# state an exhaustive set).
+_NEVER_NULL_FORMS = (
+    "never null", "not null", "non-null", "always populated", "required",
+)
+_NEGATED_FORM_RES = (
+    re.compile(r"\b(?:not|never)\s+required\b"),
+    re.compile(r"\bnot\s+always populated\b"),
+)
+_MIN_ZERO_FORMS = ("non-negative", "nonnegative", "never negative", ">= 0")
+_CLOSED_SET_MARKERS = ("one of", "must be", "allowed values", "exactly", "{")
+
+
+def _strip_negated_forms(low_text: str) -> str:
+    for pattern in _NEGATED_FORM_RES:
+        low_text = pattern.sub(" ", low_text)
+    return low_text
+
+
+def _token_stated(token: str, low_text: str) -> bool:
+    """The token appears as a whole word, not a fragment of a longer one."""
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(token.lower())}(?![a-z0-9])", low_text
+        )
+    )
+
+
+def _number_stated(bound: float, low_text: str) -> bool:
+    """The literal number appears as a complete numeric token."""
+    literal = str(int(bound)) if float(bound).is_integer() else str(bound)
+    return bool(
+        re.search(rf"(?<![0-9.]){re.escape(literal)}(?![0-9.])", low_text)
+    )
+
 
 def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
     if not isinstance(predicate, dict):
@@ -219,15 +259,47 @@ def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
         cadence = predicate.get("cadence")
         if not isinstance(cadence, str) or cadence.lower() not in text.lower():
             return False
+    if claim_type is ClaimType.COMPLETENESS:
+        nullable = predicate.get("nullable")
+        if not isinstance(nullable, bool):
+            return False
+        # entailment (PR3 cycle-2 finding: a shape-only bool lets a
+        # completion quote a claim-free sentence and fabricate
+        # nullable:false, manufacturing CONTRADICTED verdicts): a never-null
+        # predicate must be STATED in the claimed sentence, and a negated
+        # form ('not required') states the opposite
+        if nullable is False:
+            stated = _strip_negated_forms(text.lower())
+            if not any(form in stated for form in _NEVER_NULL_FORMS):
+                return False
+        return True
     if claim_type is ClaimType.DOMAIN_ENUM:
+        low = text.lower()
         values = predicate.get("values")
-        has_enum = isinstance(values, list) and all(
-            isinstance(v, (str, int, float)) for v in values
-        )
-        has_bound = any(
-            isinstance(predicate.get(k), (int, float)) for k in ("min", "max")
-        )
-        return has_enum or has_bound
+        if (
+            isinstance(values, list)
+            and values
+            and all(isinstance(v, (str, int, float)) for v in values)
+        ):
+            # closed-set phrasing required, and every claimed value must
+            # appear as a whole token in the claimed sentence
+            if not any(marker in low for marker in _CLOSED_SET_MARKERS):
+                return False
+            return all(_token_stated(str(v), low) for v in values)
+        has_bound = False
+        for key in ("min", "max"):
+            bound = predicate.get(key)
+            if isinstance(bound, bool) or not isinstance(bound, (int, float)):
+                continue
+            has_bound = True
+            stated = _number_stated(bound, low) or (
+                key == "min"
+                and bound == 0
+                and any(form in low for form in _MIN_ZERO_FORMS)
+            )
+            if not stated:
+                return False
+        return has_bound
     return all(
         isinstance(predicate.get(key), typ)
         for key, typ in _PREDICATE_SHAPES[claim_type]
