@@ -37,6 +37,7 @@ from notary.catalog import NOTARY_RUN_DATE_ENV, NotaryWriter, read_descriptions
 from notary.demo.seeder import DEFAULT_SEED, build_warehouse
 from notary.extract import AnthropicLLM, ReplayLLM, extract_claims
 from notary.incidents import (
+    close_obsolete_incident,
     draft_incident,
     fetch_usage,
     raise_incident_idempotent,
@@ -51,6 +52,15 @@ _DEMO_URNS = frozenset(
     _URN_TEMPLATE.format(table=e.table) for e in MANIFEST.claims
 )
 _DUCKDB_PLATFORM = "(urn:li:dataPlatform:duckdb,"
+
+
+def schema_matches(catalog_fields: list[str], warehouse_columns: list[str]) -> bool:
+    """Binding evidence beyond a table name (cycle-3 finding): every field
+    the catalog describes must exist as a column in the warehouse table.
+    No described fields = nothing to bind on: fail closed."""
+    if not catalog_fields:
+        return False
+    return set(catalog_fields) <= set(warehouse_columns)
 
 
 def receipt_ok(receipt: dict) -> bool:
@@ -121,7 +131,13 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        if db.exists():
+        # atomic path reservation (cycle-3 TOCTOU finding: an exists() check
+        # alone leaves a window in which another process's file at --db
+        # would later be replaced by the build)
+        db.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.close(os.open(db, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
             print(
                 f"error: --demo builds a fresh seeded warehouse and refuses "
                 f"to touch the existing file at {db}; point --db at an "
@@ -173,6 +189,33 @@ def main(argv: list[str] | None = None) -> int:
     if not descriptions:
         print("no described fields on this asset; nothing to notarize")
         return 0
+
+    if not args.demo:
+        # schema fingerprint (cycle-3 finding): the described fields must
+        # exist as columns in the warehouse table before its measurements
+        # may speak for this asset; a same-named unrelated table fails here
+        described_fields = [k for k in descriptions if k is not None]
+        table = _urn_table(args.asset)
+        con = duckdb.connect(str(db), read_only=True)
+        try:
+            cols = [
+                r[0] for r in con.execute(
+                    "select column_name from information_schema.columns "
+                    "where table_name = ?",
+                    [table],
+                ).fetchall()
+            ]
+        finally:
+            con.close()
+        if not schema_matches(described_fields, cols):
+            print(
+                f"error: the catalog's described fields "
+                f"{sorted(described_fields)} are not all present as columns "
+                f"of {table} in {db}; refusing to score this asset against "
+                f"a warehouse that does not match its schema",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         claims = extract_claims(args.asset, descriptions, llm)
@@ -230,6 +273,12 @@ def main(argv: list[str] | None = None) -> int:
         incident_urn, created = raise_incident_idempotent(args.gms, draft)
         verb = "raised" if created else "already open"
         print(f"incident {verb}: {incident_urn}")
+    else:
+        # lifecycle (cycle-3 finding): a clean run resolves the incident it
+        # made obsolete instead of leaving a stale page
+        closed = close_obsolete_incident(args.gms, args.asset, run_date)
+        if closed:
+            print(f"obsolete incident resolved: {closed}")
     return 0
 
 

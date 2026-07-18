@@ -38,6 +38,11 @@ def _short_asset(urn: str) -> str:
     return inner.split(",")[-1] if "," in inner else urn
 
 
+def incident_title(asset_urn: str) -> str:
+    """Stable per-asset title: the idempotency and lifecycle key."""
+    return f"Notary: dangerous unit/scale lie on {_short_asset(asset_urn)}"
+
+
 def draft_incident(
     asset_urn: str,
     findings: list[Finding],
@@ -79,7 +84,7 @@ def draft_incident(
     ]
     return IncidentDraft(
         resource_urn=asset_urn,
-        title=f"Notary: dangerous unit/scale lie on {asset}",
+        title=incident_title(asset_urn),
         description="\n".join(lines),
     )
 
@@ -178,6 +183,28 @@ def raise_incident_idempotent(gms_url: str, draft: IncidentDraft) -> tuple[str, 
     if existing:
         return existing, False
     return raise_incident(gms_url, draft), True
+
+
+def close_obsolete_incident(
+    gms_url: str, asset_urn: str, run_date: str
+) -> str | None:
+    """Lifecycle (PR4 cycle-3 finding): after a clean run, resolve the
+    ACTIVE Notary incident this asset no longer deserves. Returns the
+    resolved urn, or None when nothing was open."""
+    existing = find_open_notary_incident(
+        gms_url, asset_urn, incident_title(asset_urn)
+    )
+    if existing is None:
+        return None
+    resolve_incident(
+        gms_url,
+        existing,
+        note=(
+            f"Notary run {run_date}: the previously contradicted unit/scale "
+            f"claims no longer qualify as dangerous; resolving."
+        ),
+    )
+    return existing
 
 
 def resolve_incident(gms_url: str, incident_urn: str, note: str = "") -> None:

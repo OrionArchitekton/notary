@@ -155,3 +155,21 @@ def test_non_demo_requires_the_asset_table_in_the_warehouse(tmp_path):
     )
     assert r.returncode == 2
     assert "fct_payments" in r.stderr
+
+
+def test_schema_fingerprint_match_is_pure_and_strict():
+    """Cycle-3 finding: a bare table NAME is not binding evidence; the
+    asset's cataloged field names must be present as columns in the
+    warehouse table before its measurements may speak for the asset."""
+    from notary.run import schema_matches
+
+    assert schema_matches(
+        catalog_fields=["amount", "currency"],
+        warehouse_columns=["amount", "currency", "extra_col"],
+    )
+    assert not schema_matches(
+        catalog_fields=["amount", "currency"],
+        warehouse_columns=["totally", "different"],
+    )
+    # no cataloged fields = nothing to bind on: fail closed
+    assert not schema_matches(catalog_fields=[], warehouse_columns=["a"])

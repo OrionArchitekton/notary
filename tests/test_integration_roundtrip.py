@@ -244,3 +244,86 @@ def test_run_cli_single_asset_end_to_end(ingested, tmp_path):
     m = re.search(r"urn:li:incident:\S+", r.stdout)
     assert m, r.stdout
     resolve_incident(GMS, m.group(0), note="Notary test cleanup")
+
+
+def test_obsolete_incident_is_resolved_by_a_clean_run(ingested):
+    """Cycle-3 finding: after the lie is fixed, a later clean run must
+    resolve the incident it made obsolete instead of leaving a stale page.
+    close_obsolete_incident finds the ACTIVE Notary incident by title and
+    resolves it with a provenance note."""
+    import time
+
+    from notary.incidents import (
+        UsageEvidence,
+        close_obsolete_incident,
+        draft_incident,
+        find_open_notary_incident,
+        raise_incident_idempotent,
+    )
+    from notary.extract import ReplayLLM
+
+    db, _, _ = ingested
+    con = duckdb.connect(str(db), read_only=True)
+    try:
+        claims = extract_claims(
+            PAYMENTS_URN,
+            {"amount": "Transaction amount in USD."},
+            ReplayLLM("tests/fixtures/llm"),
+        )
+        findings = [
+            adjudicate(c, run_probe(plan_probe(c), con)) for c in claims
+        ]
+    finally:
+        con.close()
+    usage = UsageEvidence(940, 14, "test")
+    draft = draft_incident(
+        PAYMENTS_URN, findings, run_date="2026-07-18", usage=usage
+    )
+    urn1, _ = raise_incident_idempotent(GMS, draft)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if find_open_notary_incident(GMS, PAYMENTS_URN, draft.title) == urn1:
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError("incident never became query-visible")
+
+    resolved = close_obsolete_incident(GMS, PAYMENTS_URN, run_date="2026-07-19")
+    assert resolved == urn1
+    # second close finds nothing left to resolve
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if find_open_notary_incident(GMS, PAYMENTS_URN, draft.title) is None:
+            break
+        time.sleep(1)
+    assert close_obsolete_incident(GMS, PAYMENTS_URN, run_date="2026-07-19") is None
+
+
+def test_run_cli_clean_asset_takes_the_no_incident_path(ingested, tmp_path):
+    """Covers the CLI's else branch (cycle-3 import regression): an asset
+    whose contradictions are not dangerous (fct_refunds: a completeness lie,
+    no unit/scale contradiction) completes cleanly, raises nothing, and
+    exercises the obsolete-incident lookup."""
+    import os
+    import subprocess
+    import sys
+
+    refunds = (
+        "urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+        "fiction_retail.fct_refunds,PROD)"
+    )
+    env = {**os.environ, "NOTARY_RUN_DATE": "2026-07-18"}
+    r = subprocess.run(
+        [
+            sys.executable, "-m", "notary.run",
+            "--gms", GMS,
+            "--db", str(tmp_path / "clean-demo.duckdb"),
+            "--fixtures", "tests/fixtures/llm",
+            "--asset", refunds,
+            "--demo",
+        ],
+        capture_output=True, text=True, timeout=300, env=env,
+        cwd=str(__import__("pathlib").Path(__file__).parent.parent),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "incident raised" not in r.stdout
