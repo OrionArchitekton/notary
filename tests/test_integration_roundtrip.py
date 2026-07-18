@@ -75,10 +75,15 @@ def _reset_editable_description(urn: str, field: str, text: str) -> None:
 
 @pytest.fixture(scope="module")
 def ingested(tmp_path_factory):
+    from notary.catalog import seed_usage_stats
+
     db = tmp_path_factory.mktemp("wh") / "fiction_retail.duckdb"
     manifest = build_warehouse(db, seed=DEFAULT_SEED)
     ensure_trust_properties(GMS)
     urns = ingest_manifest(db, manifest, GMS)
+    # payments is the demo's high-usage asset: the S4 danger qualification
+    # rests on real catalog usage evidence, seeded here
+    seed_usage_stats(GMS, PAYMENTS_URN, anchor_date="2026-07-18")
     _reset_editable_description(
         PAYMENTS_URN, "amount", "Transaction amount in USD."
     )
@@ -145,14 +150,19 @@ def test_s1_round_trip_writes_verdict_back(ingested, monkeypatch):
     assert "Notary" in desc_text and "cents" in desc_text
 
 
-def test_incident_raise_and_resolve_round_trip(tmp_path):
-    """S4 tracer: a CONTRADICTED verdict raises a REAL incident on the live
-    quickstart via OSS GraphQL, and the incident is resolvable (the
-    reversibility half). Returns a real urn:li:incident:* or fails."""
-    from notary.incidents import draft_incident, raise_incident, resolve_incident
+def test_incident_raise_and_resolve_round_trip(ingested, tmp_path):
+    """S4 tracer: a CONTRADICTED unit lie on a HIGH-USAGE asset (usage
+    seeded into the live catalog, fetched back as evidence) raises a REAL
+    incident via OSS GraphQL, idempotently, and the incident is resolvable
+    (the reversibility half)."""
+    from notary.incidents import (
+        draft_incident,
+        fetch_usage,
+        raise_incident_idempotent,
+        resolve_incident,
+    )
 
-    db = tmp_path / "wh.duckdb"
-    build_warehouse(db, seed=DEFAULT_SEED)
+    db, _, _ = ingested
     con = duckdb.connect(str(db), read_only=True)
     try:
         claims = extract_claims(
@@ -167,18 +177,44 @@ def test_incident_raise_and_resolve_round_trip(tmp_path):
         con.close()
     assert any(f.verdict is Verdict.CONTRADICTED for f in findings)
 
-    draft = draft_incident(PAYMENTS_URN, findings, run_date="2026-07-18")
+    # usage evidence comes from the live catalog (seeded by the fixture),
+    # verifying the usageStats GraphQL shape against the real quickstart
+    usage = fetch_usage(GMS, PAYMENTS_URN)
+    assert usage is not None and usage.queries_last_30d >= 30
+
+    draft = draft_incident(
+        PAYMENTS_URN, findings, run_date="2026-07-18", usage=usage
+    )
     assert draft is not None
-    incident_urn = raise_incident(GMS, draft)
-    assert incident_urn.startswith("urn:li:incident:")
+    assert str(usage.queries_last_30d) in draft.description
+
+    urn1, created1 = raise_incident_idempotent(GMS, draft)
+    assert urn1.startswith("urn:li:incident:")
+    # idempotency is eventual (search index refresh); wait until the raised
+    # incident is visible to the dedup query, then a re-raise must reuse it
+    import time
+
+    from notary.incidents import find_open_notary_incident
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if find_open_notary_incident(GMS, PAYMENTS_URN, draft.title) == urn1:
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError("raised incident never became query-visible")
+    urn2, created2 = raise_incident_idempotent(GMS, draft)
+    assert urn2 == urn1
+    assert not created2
     # reversibility: resolve it (also verifies updateIncidentStatus works)
-    resolve_incident(GMS, incident_urn, note="Notary test cleanup")
+    resolve_incident(GMS, urn1, note="Notary test cleanup")
 
 
-def test_run_cli_single_asset_end_to_end(tmp_path):
+def test_run_cli_single_asset_end_to_end(ingested, tmp_path):
     """The operator command: ONE invocation reads the LIVE catalog, extracts,
     probes, adjudicates, writes the verdicts back, and raises an incident for
-    the contradicted asset. This is S1-S5 through the real front door."""
+    the contradicted high-usage asset. This is S1-S5 through the real front
+    door, in the explicit --demo mode."""
     import os
     import re
     import subprocess
@@ -195,9 +231,10 @@ def test_run_cli_single_asset_end_to_end(tmp_path):
         [
             sys.executable, "-m", "notary.run",
             "--gms", GMS,
-            "--db", str(tmp_path / "wh.duckdb"),
+            "--db", str(tmp_path / "cli-demo.duckdb"),
             "--fixtures", "tests/fixtures/llm",
             "--asset", PAYMENTS_URN,
+            "--demo",
         ],
         capture_output=True, text=True, timeout=300, env=env,
         cwd=str(__import__("pathlib").Path(__file__).parent.parent),

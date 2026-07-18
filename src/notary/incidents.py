@@ -1,9 +1,11 @@
-"""S4: raise a provenance-labeled incident on dangerously wrong context.
+"""S4: raise a provenance-labeled incident on DANGEROUSLY wrong context.
 
-Policy is a pure function (findings -> at most one IncidentDraft per asset);
-transport is OSS GraphQL (raiseIncident / updateIncidentStatus, verified
-against the local quickstart in the day-0 spike). Fail-closed: GraphQL
-errors raise, they are never swallowed into a fake success.
+Policy is a pure function (findings + usage evidence -> at most one
+IncidentDraft per asset). Spec S4 qualification, fail-closed: only a
+unit/scale contradiction on a HIGH-USAGE asset pages anyone; without usage
+evidence the qualification cannot be established and nothing is drafted.
+Transport is OSS GraphQL (raiseIncident / updateIncidentStatus, verified
+against the local quickstart). GraphQL errors raise, never swallowed.
 """
 from __future__ import annotations
 
@@ -11,7 +13,17 @@ import json
 import urllib.request
 from dataclasses import dataclass
 
-from notary.types import Finding, Verdict
+from notary.types import ClaimType, Finding, Verdict
+
+# spec S4 v1 danger bar: roughly daily-or-better use over the last month
+HIGH_USAGE_QUERY_FLOOR = 30
+
+
+@dataclass(frozen=True)
+class UsageEvidence:
+    queries_last_30d: int
+    distinct_users: int
+    source: str
 
 
 @dataclass(frozen=True)
@@ -27,31 +39,47 @@ def _short_asset(urn: str) -> str:
 
 
 def draft_incident(
-    asset_urn: str, findings: list[Finding], run_date: str
+    asset_urn: str,
+    findings: list[Finding],
+    run_date: str,
+    usage: UsageEvidence | None,
 ) -> IncidentDraft | None:
-    """At most ONE incident per asset per run, listing every contradicted
-    claim with its measured rationale. No contradiction, no incident."""
-    contradicted = [f for f in findings if f.verdict is Verdict.CONTRADICTED]
-    if not contradicted:
+    """Spec S4: a CONTRADICTED unit/scale claim on a high-usage asset drafts
+    ONE incident naming the claims, the evidence, and the affected-usage
+    summary. Fail-closed on every leg: no unit/scale contradiction, no usage
+    evidence, or usage below the floor each draft NOTHING."""
+    dangerous = [
+        f for f in findings
+        if f.verdict is Verdict.CONTRADICTED
+        and f.claim.claim_type is ClaimType.UNIT_SCALE
+    ]
+    if not dangerous:
+        return None
+    if usage is None or usage.queries_last_30d < HIGH_USAGE_QUERY_FLOOR:
         return None
     asset = _short_asset(asset_urn)
     lines = [
-        f"Notary contradicted {len(contradicted)} catalog claim(s) on "
+        f"Notary contradicted {len(dangerous)} unit/scale claim(s) on "
         f"`{asset}` against measured warehouse reality:",
         "",
     ]
-    for f in contradicted:
+    for f in dangerous:
         field = f.claim.field_path or "(table)"
         lines.append(f"- `{field}`: \"{f.claim.text}\" is contradicted: "
                      f"{f.rationale}")
     lines += [
+        "",
+        f"Affected usage: {usage.queries_last_30d} queries in the last 30 "
+        f"days by {usage.distinct_users} distinct user(s) "
+        f"({usage.source}). A unit/scale lie at this usage level propagates "
+        f"wrong magnitudes into everything reading this asset.",
         "",
         f"Raised by Notary run {run_date}. Evidence dossiers and the trust "
         f"ledger on the asset carry the probe SQL and measurements.",
     ]
     return IncidentDraft(
         resource_urn=asset_urn,
-        title=f"Notary: catalog description contradicted on {asset}",
+        title=f"Notary: dangerous unit/scale lie on {asset}",
         description="\n".join(lines),
     )
 
@@ -68,6 +96,48 @@ def _graphql(gms_url: str, query: str, variables: dict) -> dict:
     if data.get("errors"):
         raise RuntimeError(f"graphql call failed: {data['errors']}")
     return data.get("data") or {}
+
+
+def fetch_usage(gms_url: str, asset_urn: str) -> UsageEvidence | None:
+    """Read the asset's usage stats from DataHub (MONTH window). Returns
+    None when no usage evidence exists; the policy then fails closed."""
+    data = _graphql(
+        gms_url,
+        "query($urn: String!) { dataset(urn: $urn) { "
+        "usageStats(range: MONTH) { aggregations "
+        "{ totalSqlQueries uniqueUserCount } } } }",
+        {"urn": asset_urn},
+    )
+    agg = (((data.get("dataset") or {}).get("usageStats") or {})
+           .get("aggregations") or {})
+    queries = agg.get("totalSqlQueries")
+    if not queries:
+        return None
+    return UsageEvidence(
+        queries_last_30d=int(queries),
+        distinct_users=int(agg.get("uniqueUserCount") or 0),
+        source="datahub usageStats MONTH",
+    )
+
+
+def find_open_notary_incident(
+    gms_url: str, asset_urn: str, title: str
+) -> str | None:
+    """An ACTIVE incident with the same Notary title, if one exists
+    (idempotency: re-running a day's verdicts must not page twice)."""
+    data = _graphql(
+        gms_url,
+        "query($urn: String!) { dataset(urn: $urn) { "
+        "incidents(state: ACTIVE, start: 0, count: 50) { "
+        "incidents { urn title } } } }",
+        {"urn": asset_urn},
+    )
+    incidents = (((data.get("dataset") or {}).get("incidents") or {})
+                 .get("incidents") or [])
+    for inc in incidents:
+        if inc.get("title") == title:
+            return inc.get("urn")
+    return None
 
 
 def raise_incident(gms_url: str, draft: IncidentDraft) -> str:
@@ -88,6 +158,19 @@ def raise_incident(gms_url: str, draft: IncidentDraft) -> str:
     if not urn:
         raise RuntimeError("raiseIncident returned no incident urn")
     return urn
+
+
+def raise_incident_idempotent(gms_url: str, draft: IncidentDraft) -> tuple[str, bool]:
+    """Raise unless an ACTIVE incident with this title already exists.
+    Returns (incident_urn, created).
+
+    Idempotency is EVENTUAL: the incident search index refreshes
+    asynchronously, so two raises within the same refresh window (roughly
+    seconds) can both create. Re-runs at human timescales are deduped."""
+    existing = find_open_notary_incident(gms_url, draft.resource_urn, draft.title)
+    if existing:
+        return existing, False
+    return raise_incident(gms_url, draft), True
 
 
 def resolve_incident(gms_url: str, incident_urn: str, note: str = "") -> None:

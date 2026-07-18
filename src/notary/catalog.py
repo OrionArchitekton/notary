@@ -402,3 +402,45 @@ def _corrected_description(finding, run_date: str) -> str:
         f"({measured}; {finding.rationale}). See the Notary evidence dossier "
         f"before trusting either statement."
     )
+
+
+def seed_usage_stats(
+    gms_url: str,
+    asset_urn: str,
+    anchor_date: str,
+    queries_per_day: int = 31,
+    distinct_users: int = 14,
+    days: int = 30,
+) -> None:
+    """Demo-only: emit daily usage buckets for an asset so the S4 danger
+    qualification (high usage) rests on REAL catalog usage evidence instead
+    of an asserted flag. Buckets end at anchor_date; re-seed with a current
+    anchor if the demo is re-run far outside the original window."""
+    from datetime import date, timedelta
+
+    from datahub.emitter.mcp import MetadataChangeProposalWrapper
+    from datahub.emitter.rest_emitter import DatahubRestEmitter
+    from datahub.metadata.schema_classes import (
+        CalendarIntervalClass,
+        DatasetUsageStatisticsClass,
+        TimeWindowSizeClass,
+    )
+
+    emitter = DatahubRestEmitter(gms_server=gms_url)
+    anchor = date.fromisoformat(anchor_date)
+    for offset in range(days):
+        day = anchor - timedelta(days=offset)
+        ts_ms = int(
+            __import__("calendar").timegm(day.timetuple()) * 1000
+        )
+        aspect = DatasetUsageStatisticsClass(
+            timestampMillis=ts_ms,
+            eventGranularity=TimeWindowSizeClass(
+                unit=CalendarIntervalClass.DAY, multiple=1
+            ),
+            totalSqlQueries=queries_per_day,
+            uniqueUserCount=distinct_users,
+        )
+        emitter.emit(
+            MetadataChangeProposalWrapper(entityUrn=asset_urn, aspect=aspect)
+        )
