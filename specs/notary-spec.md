@@ -102,8 +102,12 @@ README and demo.
 - **Honesty**: every surfaced number comes from a real run; frozen demo artifacts
   are real captured outputs, disclosed as such. UNVERIFIABLE is a first-class
   verdict, never hidden.
-- **Determinism**: LLM calls run at deterministic settings; probes are pure SQL;
-  the same warehouse state yields the same verdicts (demo stability).
+- **Determinism**: probes are pure SQL and adjudication is a pure rubric, so
+  the same warehouse state and the same extracted claims yield the same
+  verdicts. The LLM boundary is deterministic where stability matters: tests
+  and the frozen demo replay captured completions verbatim (current Claude
+  models accept no sampling knobs, so live extraction does not promise
+  run-to-run identity).
 - **Provenance labeling**: every catalog mutation Notary makes is attributable to
   Notary in that surface (ledger property, document authorship, description
   provenance line, incident reporter).

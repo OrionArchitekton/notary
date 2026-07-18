@@ -1,0 +1,9 @@
+{
+ "completion": "[]",
+ "user": "Asset: urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.dim_customers,PROD)\nTarget: column `customer_id`\nDescription: Primary key.",
+ "meta": {
+  "model": "claude-opus-4-8",
+  "captured_at": "2026-07-18",
+  "note": "real completion captured for strict replay in unit tests"
+ }
+}
