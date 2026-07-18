@@ -104,3 +104,54 @@ def test_receipt_with_failed_description_is_not_ok():
     assert not receipt_ok(bad_desc)
     assert not receipt_ok(bad_doc)
     assert not receipt_ok({"ledger": False, "documents": [], "descriptions": []})
+
+
+def test_demo_mode_rejects_urns_outside_the_manifest(tmp_path):
+    """Cycle-2 finding: the demo allowlist is EXACT manifest-derived urns,
+    not a name prefix; an unseeded fiction_retail.* asset must be refused."""
+    fake = (
+        "urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+        "fiction_retail.made_up_table,PROD)"
+    )
+    r = _run(
+        ["--asset", fake, "--demo", "--db", str(tmp_path / "wh.duckdb")],
+        {"NOTARY_RUN_DATE": "2026-07-18"},
+    )
+    assert r.returncode == 2
+    assert "demo" in r.stderr.lower()
+
+
+def test_non_demo_rejects_non_duckdb_platforms(tmp_path):
+    """Cycle-2 CRITICAL: the CLI probes DuckDB warehouses only; verdicts for
+    a snowflake (or any other platform) asset cannot be derived from a local
+    DuckDB file."""
+    db = tmp_path / "wh.duckdb"
+    import duckdb
+
+    con = duckdb.connect(str(db))
+    con.execute("create table fct_payments (amount double)")
+    con.close()
+    r = _run(
+        ["--asset", FOREIGN_URN, "--db", str(db)],
+        {"NOTARY_RUN_DATE": "2026-07-18"},
+    )
+    assert r.returncode == 2
+    assert "duckdb" in r.stderr.lower()
+
+
+def test_non_demo_requires_the_asset_table_in_the_warehouse(tmp_path):
+    """Cycle-2 CRITICAL companion: the asset's table must exist in the
+    supplied warehouse; probing an unrelated database for an asset's
+    verdicts is a false finding."""
+    db = tmp_path / "wh.duckdb"
+    import duckdb
+
+    con = duckdb.connect(str(db))
+    con.execute("create table something_else (x integer)")
+    con.close()
+    r = _run(
+        ["--asset", DEMO_URN, "--db", str(db)],
+        {"NOTARY_RUN_DATE": "2026-07-18"},
+    )
+    assert r.returncode == 2
+    assert "fct_payments" in r.stderr

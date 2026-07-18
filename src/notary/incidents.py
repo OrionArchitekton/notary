@@ -124,20 +124,27 @@ def find_open_notary_incident(
     gms_url: str, asset_urn: str, title: str
 ) -> str | None:
     """An ACTIVE incident with the same Notary title, if one exists
-    (idempotency: re-running a day's verdicts must not page twice)."""
-    data = _graphql(
-        gms_url,
-        "query($urn: String!) { dataset(urn: $urn) { "
-        "incidents(state: ACTIVE, start: 0, count: 50) { "
-        "incidents { urn title } } } }",
-        {"urn": asset_urn},
-    )
-    incidents = (((data.get("dataset") or {}).get("incidents") or {})
-                 .get("incidents") or [])
-    for inc in incidents:
-        if inc.get("title") == title:
-            return inc.get("urn")
-    return None
+    (idempotency: re-running a day's verdicts must not page twice).
+    Paginates the full ACTIVE list (cycle-2 finding: a single 50-count page
+    would miss a matching incident on a heavily paged asset)."""
+    start, page = 0, 50
+    while True:
+        data = _graphql(
+            gms_url,
+            "query($urn: String!, $start: Int!, $count: Int!) "
+            "{ dataset(urn: $urn) { "
+            "incidents(state: ACTIVE, start: $start, count: $count) { "
+            "incidents { urn title } } } }",
+            {"urn": asset_urn, "start": start, "count": page},
+        )
+        incidents = (((data.get("dataset") or {}).get("incidents") or {})
+                     .get("incidents") or [])
+        for inc in incidents:
+            if inc.get("title") == title:
+                return inc.get("urn")
+        if len(incidents) < page:
+            return None
+        start += page
 
 
 def raise_incident(gms_url: str, draft: IncidentDraft) -> str:

@@ -41,9 +41,16 @@ from notary.incidents import (
     fetch_usage,
     raise_incident_idempotent,
 )
-from notary.probe import plan_probe, run_probe
+from notary.demo.seeder import MANIFEST
+from notary.probe import _urn_table, plan_probe, run_probe
 
-_DEMO_URN_PREFIX = "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail."
+_URN_TEMPLATE = "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.{table},PROD)"
+# exact manifest-derived allowlist (cycle-2 finding: a name PREFIX would
+# authorize fiction verdicts for any unseeded asset in that namespace)
+_DEMO_URNS = frozenset(
+    _URN_TEMPLATE.format(table=e.table) for e in MANIFEST.claims
+)
+_DUCKDB_PLATFORM = "(urn:li:dataPlatform:duckdb,"
 
 
 def receipt_ok(receipt: dict) -> bool:
@@ -105,12 +112,12 @@ def main(argv: list[str] | None = None) -> int:
 
     db = Path(args.db)
     if args.demo:
-        if not args.asset.startswith(_DEMO_URN_PREFIX):
+        if args.asset not in _DEMO_URNS:
             print(
                 f"error: --demo probes the seeded fiction warehouse; "
                 f"writing its verdicts to {args.asset} would be a false "
-                f"catalog finding. Only {_DEMO_URN_PREFIX}* urns are "
-                f"accepted in demo mode",
+                f"catalog finding. Demo mode accepts exactly the "
+                f"manifest-seeded urns",
                 file=sys.stderr,
             )
             return 2
@@ -122,13 +129,42 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-    elif not db.exists():
-        print(
-            f"error: warehouse {db} does not exist; the CLI never builds "
-            f"one outside --demo mode",
-            file=sys.stderr,
-        )
-        return 2
+    else:
+        if _DUCKDB_PLATFORM not in args.asset:
+            print(
+                f"error: this CLI probes duckdb warehouses only; verdicts "
+                f"for {args.asset} cannot be derived from a local duckdb "
+                f"file (asset-warehouse binding)",
+                file=sys.stderr,
+            )
+            return 2
+        if not db.exists():
+            print(
+                f"error: warehouse {db} does not exist; the CLI never "
+                f"builds one outside --demo mode",
+                file=sys.stderr,
+            )
+            return 2
+        # bind the asset to the warehouse: its table must exist there
+        # (probing an unrelated database yields false findings)
+        table = _urn_table(args.asset)
+        con = duckdb.connect(str(db), read_only=True)
+        try:
+            hit = con.execute(
+                "select count(*) from information_schema.tables "
+                "where table_name = ?",
+                [table],
+            ).fetchone()[0]
+        finally:
+            con.close()
+        if not hit:
+            print(
+                f"error: table {table} does not exist in warehouse {db}; "
+                f"refusing to score {args.asset} against an unrelated "
+                f"database",
+                file=sys.stderr,
+            )
+            return 2
 
     llm = AnthropicLLM() if args.live else ReplayLLM(args.fixtures)
 
