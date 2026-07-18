@@ -302,3 +302,131 @@ def test_empty_claimed_enum_is_unverifiable_not_contradicted(warehouse):
     )
     finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
     assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def _big_table(tmp_path, name, ddl, insert):
+    db = tmp_path / f"{name}.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute(ddl)
+    con.execute(insert)
+    con.close()
+    return duckdb.connect(str(db), read_only=True)
+
+
+def test_capped_scan_cannot_confirm_never_null(tmp_path):
+    """PR3 review (adversarial HIGH): a zero-null PREFIX cannot confirm a
+    universal never-null claim; when the scan hits its cap the confirm
+    branch falls to UNVERIFIABLE (contradiction from a sample stays valid)."""
+    ro = _big_table(
+        tmp_path, "cap1", "create table t (v integer)",
+        "insert into t select range from range(100001)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="v", claim_type=ClaimType.COMPLETENESS,
+            text="Never null.", predicate={"nullable": False},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_capped_scan_cannot_confirm_bounds(tmp_path):
+    """PR3 review: same universal-claim guard for the bounds branch."""
+    ro = _big_table(
+        tmp_path, "cap2", "create table t (v integer)",
+        "insert into t select range from range(100001)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="v", claim_type=ClaimType.DOMAIN_ENUM,
+            text="Non-negative.", predicate={"min": 0},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_capped_scan_cannot_confirm_enum_subset(tmp_path):
+    """PR3 review (bot P1 + Codex HIGH): the distinct probe bounds the rows
+    it READS, and a subset observed within a capped input scan proves
+    nothing; the confirm branch falls to UNVERIFIABLE."""
+    ro = _big_table(
+        tmp_path, "cap3", "create table t (v varchar)",
+        "insert into t select 'a' from range(100001)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="v", claim_type=ClaimType.DOMAIN_ENUM,
+            text="One of {a}.", predicate={"values": ["a"]},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_freshness_never_confirms_from_ambiguous_columns(tmp_path):
+    """PR3 review (Codex HIGH x2): with multiple temporal columns nothing
+    identifies which one is the refresh marker, so a fresh business date
+    must not CONFIRM cadence; staleness of the max across ALL columns is an
+    upper bound, so contradiction stays valid."""
+    ro = _big_table(
+        tmp_path, "fresh1",
+        "create table t (updated_at date, delivery_date date)",
+        "insert into t values (date '2026-05-01', date '2026-07-18')",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path=None, claim_type=ClaimType.FRESHNESS,
+            text="Updated daily.", predicate={"cadence": "daily"},
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, as_of="2026-07-18"), ro)
+        )
+        assert finding.verdict is Verdict.UNVERIFIABLE  # fresh biz date, no confirm
+
+        stale = _big_table(
+            tmp_path, "fresh2",
+            "create table t (updated_at date, delivery_date date)",
+            "insert into t values (date '2026-05-01', date '2026-05-02')",
+        )
+        try:
+            f2 = adjudicate(
+                claim, run_probe(plan_probe(claim, as_of="2026-07-18"), stale)
+            )
+            assert f2.verdict is Verdict.CONTRADICTED  # even the newest is stale
+        finally:
+            stale.close()
+    finally:
+        ro.close()
+
+
+def test_hourly_cadence_never_confirms_at_date_precision(tmp_path):
+    """PR3 review (bot P1 + adversarial HIGH): a date-granular anchor cannot
+    prove an hourly cadence; a timestamp on the anchor day may still be
+    nearly 24h behind. Hourly confirmation is unreachable in v1;
+    contradiction (days behind) still works."""
+    ro = _big_table(
+        tmp_path, "hourly1",
+        "create table t (snapshot_at timestamp)",
+        "insert into t values (timestamp '2026-07-18 00:00:00')",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path=None, claim_type=ClaimType.FRESHNESS,
+            text="Refreshed hourly.", predicate={"cadence": "hourly"},
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, as_of="2026-07-18"), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE

@@ -76,16 +76,23 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
         if not _IDENT.match(col):
             raise ValueError(f"unsafe column identifier: {col!r}")
         if isinstance(claim.predicate.get("values"), list):
-            # one row past the cap tells the runner the distinct set was NOT
-            # fully observed, so CONFIRMED stays unreachable on a capped scan
+            # the inner LIMIT bounds the rows READ (bot P1: an outer
+            # distinct-limit alone caps output groups, not input scan); one
+            # row past DISTINCT_CAP tells the runner the distinct set was
+            # not fully observed
             sql = (
-                f'select distinct "{col}" as v from "{table}" '
-                f'where "{col}" is not null limit {DISTINCT_CAP + 1}'
+                f'select distinct v from '
+                f'(select "{col}" as v from "{table}" '
+                f'where "{col}" is not null limit {SCAN_LIMIT}) '
+                f'limit {DISTINCT_CAP + 1}'
             )
             return ProbeSpec(
                 claim=claim,
                 sql=sql,
-                measure_keys=("observed_values", "distinct_capped"),
+                measure_keys=(
+                    "observed_values", "distinct_capped",
+                    "rows_scanned", "scan_limit",
+                ),
             )
         if any(
             isinstance(claim.predicate.get(k), (int, float)) for k in ("min", "max")
@@ -140,8 +147,14 @@ def run_probe(spec: ProbeSpec, con: duckdb.DuckDBPyConnection) -> ProbeResult:
     if spec.claim.claim_type is ClaimType.FRESHNESS and spec.as_of:
         return _run_freshness_probe(spec, con)
     if "observed_values" in spec.measure_keys:
+        table = _urn_table(spec.claim.asset_urn)
+        col = spec.claim.field_path
         try:
             rows = con.execute(spec.sql).fetchall()
+            rows_scanned = con.execute(
+                f'select count(*) from (select 1 from "{table}" '
+                f'where "{col}" is not null limit {SCAN_LIMIT})'
+            ).fetchone()[0]
         except duckdb.Error as e:
             return ProbeResult(spec=spec, measurements={}, error=str(e))
         values = sorted(str(r[0]) for r in rows[:DISTINCT_CAP])
@@ -150,6 +163,8 @@ def run_probe(spec: ProbeSpec, con: duckdb.DuckDBPyConnection) -> ProbeResult:
             measurements={
                 "observed_values": values,
                 "distinct_capped": len(rows) > DISTINCT_CAP,
+                "rows_scanned": int(rows_scanned),
+                "scan_limit": SCAN_LIMIT,
             },
         )
     try:
@@ -168,6 +183,10 @@ def _run_freshness_probe(
     table = _urn_table(spec.claim.asset_urn)
     try:
         cols = [r[0] for r in con.execute(spec.sql).fetchall()]
+        rows_scanned = con.execute(
+            f'select count(*) from (select 1 from "{table}" '
+            f'limit {SCAN_LIMIT})'
+        ).fetchone()[0]
     except duckdb.Error as e:
         return ProbeResult(spec=spec, measurements={}, error=str(e))
     cols = [c for c in cols if _IDENT.match(c)]
@@ -180,8 +199,11 @@ def _run_freshness_probe(
     latest_column = None
     try:
         for col in cols:
+            # bounded input scan (bot P1: an unbounded max() per temporal
+            # column violates the spec's bounded scan-cost constraint)
             value = con.execute(
-                f'select max("{col}") from "{table}"'
+                f'select max(m) from (select "{col}" as m from "{table}" '
+                f'limit {SCAN_LIMIT})'
             ).fetchone()[0]
             if value is None:
                 continue
@@ -202,7 +224,10 @@ def _run_freshness_probe(
             "latest_value": latest_value.isoformat(),
             "latest_column": latest_column,
             "date_columns": cols,
+            "temporal_column_count": len(cols),
             "days_stale": days_stale,
             "as_of": spec.as_of,
+            "rows_scanned": int(rows_scanned),
+            "scan_limit": SCAN_LIMIT,
         },
     )

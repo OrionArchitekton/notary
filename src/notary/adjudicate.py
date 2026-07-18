@@ -153,6 +153,8 @@ def _adjudicate_completeness(claim: Claim, result: ProbeResult) -> Finding:
         "probe_sql": result.spec.sql,
         "rubric": _COMPLETENESS_RUBRIC_TEXT,
     }
+    scan_limit = int(m.get("scan_limit") or 0)
+    scanned_all = scan_limit > 0 and row_count < scan_limit
     if null_share >= _NULL_SHARE_CONTRADICTION_FLOOR:
         return Finding(
             claim=claim,
@@ -161,6 +163,19 @@ def _adjudicate_completeness(claim: Claim, result: ProbeResult) -> Finding:
             rationale=(
                 f"described as never null but {null_share:.1%} of "
                 f"{row_count} scanned rows are null"
+            ),
+        )
+    if not scanned_all:
+        # a capped prefix cannot prove a universal never-null claim
+        # (PR3 adversarial finding); nulls found in the sample above still
+        # contradict, but a clean sample proves nothing beyond itself
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"scan capped at {scan_limit} rows; a clean prefix cannot "
+                f"confirm a universal never-null claim; refusing to guess"
             ),
         )
     if null_share == 0.0 and row_count >= _CONFIRM_MIN_ROWS:
@@ -201,12 +216,15 @@ def _adjudicate_domain_enum(claim: Claim, result: ProbeResult) -> Finding:
             "observed_values": observed,
             "unexpected_values": unexpected,
             "distinct_capped": capped,
+            "rows_scanned": m.get("rows_scanned"),
+            "scan_limit": m.get("scan_limit"),
             "probe_sql": result.spec.sql,
             "rubric": (
                 "CONTRADICTED iff any observed distinct value is outside the "
                 "claimed set; CONFIRMED iff the complete distinct set was "
-                "observed (not capped), is non-empty, and is a subset of the "
-                "claimed set; otherwise UNVERIFIABLE"
+                "observed (not capped) over a complete input scan (under the "
+                "scan limit), is non-empty, and is a subset of the claimed "
+                "set; otherwise UNVERIFIABLE"
             ),
         }
         if unexpected:
@@ -219,14 +237,17 @@ def _adjudicate_domain_enum(claim: Claim, result: ProbeResult) -> Finding:
                     f"{unexpected} in the data"
                 ),
             )
-        if observed and not capped:
+        rows_scanned = int(m.get("rows_scanned") or 0)
+        scan_limit = int(m.get("scan_limit") or 0)
+        scanned_all = scan_limit > 0 and rows_scanned < scan_limit
+        if observed and not capped and scanned_all:
             return Finding(
                 claim=claim,
                 verdict=Verdict.CONFIRMED,
                 evidence=evidence,
                 rationale=(
-                    f"complete distinct set {observed} sits inside the "
-                    f"claimed set"
+                    f"complete distinct set {observed} over all "
+                    f"{rows_scanned} rows sits inside the claimed set"
                 ),
             )
         return Finding(
@@ -234,8 +255,9 @@ def _adjudicate_domain_enum(claim: Claim, result: ProbeResult) -> Finding:
             verdict=Verdict.UNVERIFIABLE,
             evidence=evidence,
             rationale=(
-                "distinct set empty or observation capped; a subset seen in "
-                "a capped sample proves nothing; refusing to guess"
+                "distinct set empty, distinct observation capped, or input "
+                "scan capped; a subset seen in a bounded sample proves "
+                "nothing; refusing to guess"
             ),
         )
     has_bound = any(
@@ -278,6 +300,18 @@ def _adjudicate_domain_enum(claim: Claim, result: ProbeResult) -> Finding:
                 evidence=evidence,
                 rationale="; ".join(violations),
             )
+        scan_limit = int(m.get("scan_limit") or 0)
+        if not (scan_limit > 0 and int(m["row_count"]) < scan_limit):
+            # a capped prefix cannot prove a universal bound claim
+            return Finding(
+                claim=claim,
+                verdict=Verdict.UNVERIFIABLE,
+                evidence=evidence,
+                rationale=(
+                    f"scan capped at {scan_limit} rows; an in-bounds prefix "
+                    f"cannot confirm a universal bound; refusing to guess"
+                ),
+            )
         return Finding(
             claim=claim,
             verdict=Verdict.CONFIRMED,
@@ -295,9 +329,12 @@ def _adjudicate_domain_enum(claim: Claim, result: ProbeResult) -> Finding:
 # CONTRADICTED at or above the contradiction floor, UNVERIFIABLE between
 # (a cadence briefly missed is not yet a lie). Unknown cadences get no
 # rubric.
-_CADENCE_BANDS: dict[str, tuple[int, int]] = {
+_CADENCE_BANDS: dict[str, tuple[int | None, int]] = {
     # cadence: (confirm_ceiling_days, contradiction_floor_days)
-    "hourly": (0, 2),
+    # hourly confirm_ceiling is None: a date-granular anchor cannot prove an
+    # hourly cadence (PR3 finding: a timestamp on the anchor day may still
+    # be nearly 24h behind), so hourly confirmation is unreachable in v1
+    "hourly": (None, 2),
     "daily": (1, 7),
     "weekly": (7, 21),
 }
@@ -311,28 +348,73 @@ def _adjudicate_freshness(claim: Claim, result: ProbeResult) -> Finding:
         return _unverifiable_no_rubric(claim, result)
     confirm_ceiling, contradiction_floor = band
     days_stale = int(m["days_stale"])
+    rows_scanned = int(m.get("rows_scanned") or 0)
+    scan_limit = int(m.get("scan_limit") or 0)
+    scanned_all = scan_limit > 0 and rows_scanned < scan_limit
+    column_count = int(m.get("temporal_column_count") or 0)
     evidence = {
         "cadence_claimed": cadence,
         "days_stale": days_stale,
         "latest_value": m.get("latest_value"),
         "latest_column": m.get("latest_column"),
+        "temporal_column_count": column_count,
         "as_of": m.get("as_of"),
+        "rows_scanned": rows_scanned,
+        "scan_limit": scan_limit,
         "probe_sql": result.spec.sql,
         "rubric": (
-            f"for cadence '{cadence}': CONFIRMED iff 0 <= days_stale <= "
-            f"{confirm_ceiling}; CONTRADICTED iff days_stale >= "
-            f"{contradiction_floor}; otherwise UNVERIFIABLE"
+            f"for cadence '{cadence}': CONTRADICTED iff days_stale >= "
+            f"{contradiction_floor} over a complete scan; CONFIRMED iff "
+            f"0 <= days_stale <= {confirm_ceiling} over a complete scan of "
+            f"a table with exactly one temporal column; otherwise "
+            f"UNVERIFIABLE (a capped-scan max can understate staleness; "
+            f"with multiple temporal columns nothing identifies the refresh "
+            f"marker, and staleness of the max across ALL columns is only "
+            f"an upper bound, valid for contradiction alone)"
         ),
     }
+    if not scanned_all:
+        # a prefix max can understate the true latest value, so neither
+        # verdict is safe from a capped scan
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"scan capped at {scan_limit} rows; a prefix max cannot "
+                f"support a freshness verdict; refusing to guess"
+            ),
+        )
     if days_stale >= contradiction_floor:
         return Finding(
             claim=claim,
             verdict=Verdict.CONTRADICTED,
             evidence=evidence,
             rationale=(
-                f"described as {cadence} but the latest value "
+                f"described as {cadence} but even the newest temporal value "
                 f"({m.get('latest_value')} in {m.get('latest_column')}) is "
                 f"{days_stale} days old as of {m.get('as_of')}"
+            ),
+        )
+    if confirm_ceiling is None:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"a date-granular anchor cannot prove the {cadence} "
+                f"cadence; refusing to guess"
+            ),
+        )
+    if column_count != 1:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"{column_count} temporal columns and nothing identifies "
+                f"which is the refresh marker; a fresh business date must "
+                f"not confirm cadence; refusing to guess"
             ),
         )
     if 0 <= days_stale <= confirm_ceiling:
