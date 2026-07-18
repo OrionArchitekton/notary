@@ -31,6 +31,12 @@ class CatalogEntry:
     planted_lie: bool
     claim_type: ClaimType | None  # the claim type the entry exercises
     truth_note: str  # what the data actually does (for the eval report)
+    # The exact sentence stating the planted claim, when the description has
+    # more than one sentence (pipeline finding: a catch must match the
+    # planted sentence, not merely the claim type, or a contradiction against
+    # a truthful same-type neighbour sentence is credited as a catch).
+    # None = the whole description is the claim.
+    planted_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,7 +68,7 @@ ENTRIES: tuple[CatalogEntry, ...] = (
     CatalogEntry("dim_customers", "email",
                  "Customer email address. Never null.",
                  True, ClaimType.COMPLETENESS,
-                 "~5 percent of rows are null"),
+                 "~5 percent of rows are null", planted_text="Never null."),
     CatalogEntry("dim_customers", "country_code",
                  "ISO-3166 alpha-2 country code.",
                  False, ClaimType.DOMAIN_ENUM,
@@ -83,12 +89,14 @@ ENTRIES: tuple[CatalogEntry, ...] = (
     CatalogEntry("fct_orders", "shipped_at",
                  "Shipment timestamp. Always populated.",
                  True, ClaimType.COMPLETENESS,
-                 "~10 percent null (unshipped orders)"),
+                 "~10 percent null (unshipped orders)",
+                 planted_text="Always populated."),
     # fct_sessions_daily
     CatalogEntry("fct_sessions_daily", None,
                  "Daily session rollup. Updated daily.",
                  True, ClaimType.FRESHNESS,
-                 "latest event_date is ~51 days stale"),
+                 "latest event_date is ~51 days stale",
+                 planted_text="Updated daily."),
     CatalogEntry("fct_sessions_daily", "duration_ms",
                  "Session duration in milliseconds.",
                  True, ClaimType.UNIT_SCALE,
@@ -115,7 +123,7 @@ ENTRIES: tuple[CatalogEntry, ...] = (
     CatalogEntry("fct_refunds", "reason",
                  "Refund reason. Required field.",
                  True, ClaimType.COMPLETENESS,
-                 "~15 percent null"),
+                 "~15 percent null", planted_text="Required field."),
     # stg_inventory
     CatalogEntry("stg_inventory", None,
                  "Live warehouse inventory, refreshed hourly.",
@@ -124,7 +132,8 @@ ENTRIES: tuple[CatalogEntry, ...] = (
     CatalogEntry("stg_inventory", "qty",
                  "Units on hand. Non-negative.",
                  True, ClaimType.DOMAIN_ENUM,
-                 "contains negative oversell values"),
+                 "contains negative oversell values",
+                 planted_text="Non-negative."),
 )
 
 MANIFEST = Manifest(claims=ENTRIES)

@@ -1,0 +1,9 @@
+{
+ "completion": "[{\"claim_type\":\"completeness\",\"text\":\"Required field.\",\"predicate\":{\"nullable\":false}}]",
+ "user": "Asset: urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_refunds,PROD)\nTarget: column `reason`\nDescription: Refund reason. Required field.",
+ "meta": {
+  "model": "claude-opus-4-8",
+  "captured_at": "2026-07-18",
+  "note": "real completion captured for strict replay in unit tests"
+ }
+}

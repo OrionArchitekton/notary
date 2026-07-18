@@ -44,6 +44,14 @@ def _prompt_key(system: str, user: str) -> str:
     return hashlib.sha256((system + "\x00" + user).encode()).hexdigest()[:24]
 
 
+# Prompt keys the provider permanently refuses to complete (content-filter
+# 400, deterministic across attempts). Shared by the capture script (skip +
+# exclude from the failure exit code) and the eval CLI (allow the fixture to
+# be absent without failing the required-store gate). One entry:
+# dim_customers.country_code "ISO-3166 alpha-2 country code." (2026-07-18).
+KNOWN_UNCAPTURABLE = frozenset({"18a856fd6bfc4054c9a7798f"})
+
+
 class ReplayLLM:
     """Strict replay of captured completions.
 
@@ -61,7 +69,18 @@ class ReplayLLM:
                 f"no captured completion for prompt key {p.stem} "
                 f"(user prompt starts: {user[:80]!r})"
             )
-        return json.loads(p.read_text())["completion"]
+        record = json.loads(p.read_text())
+        # Cycle-3 adversarial fix: bind the fixture to its prompt, not just
+        # its filename. A fixture copied under another prompt's key would
+        # otherwise silently supply the wrong completion and change the
+        # published table.
+        if record.get("user") != user:
+            raise ValueError(
+                f"fixture {p.name} does not match the requesting prompt: "
+                f"stored user prompt differs (file moved or copied under the "
+                f"wrong key?)"
+            )
+        return record["completion"]
 
 
 class AnthropicLLM:
@@ -165,6 +184,22 @@ def _grounded(item: dict, description: str) -> bool:
     return isinstance(text, str) and bool(text.strip()) and text in description
 
 
+# SYSTEM_PROMPT teaches normalized unit tokens that never occur verbatim in
+# prose (fleet-review finding: the captured discount_pct completion carries
+# "percent_0_100", which the verbatim entailment check can never match, so
+# every percent claim was silently gate-dropped). Map each normalized token
+# to the surface forms that entail it; a token not listed here still requires
+# its own verbatim occurrence, so the anti-hallucination property is kept.
+_UNIT_SURFACE_FORMS: dict[str, tuple[str, ...]] = {
+    "percent_0_100": ("percent", "%"),
+}
+
+# percent_0_100 encodes a RANGE as well as a unit (pipeline finding: the
+# surface word "percent" alone does not entail the 0-to-100 scale; the
+# sentence must state the range or the LLM could invent it).
+_PERCENT_RANGE_RE = re.compile(r"\b0\s*(?:and|to|-)\s*100\b", re.IGNORECASE)
+
+
 def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
     if not isinstance(predicate, dict):
         return False
@@ -173,7 +208,12 @@ def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
     # the stated unit/cadence must literally appear in the claimed sentence.
     if claim_type is ClaimType.UNIT_SCALE:
         unit = predicate.get("unit")
-        if not isinstance(unit, str) or unit.upper() not in text.upper():
+        if not isinstance(unit, str):
+            return False
+        surface_forms = _UNIT_SURFACE_FORMS.get(unit.lower(), (unit,))
+        if not any(f.upper() in text.upper() for f in surface_forms):
+            return False
+        if unit.lower() == "percent_0_100" and not _PERCENT_RANGE_RE.search(text):
             return False
     if claim_type is ClaimType.FRESHNESS:
         cadence = predicate.get("cadence")

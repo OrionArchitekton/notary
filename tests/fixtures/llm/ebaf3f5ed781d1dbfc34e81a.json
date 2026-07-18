@@ -1,0 +1,9 @@
+{
+ "completion": "[{\"claim_type\":\"domain_enum\",\"text\":\"Non-negative.\",\"predicate\":{\"min\":0}}]",
+ "user": "Asset: urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.stg_inventory,PROD)\nTarget: column `qty`\nDescription: Units on hand. Non-negative.",
+ "meta": {
+  "model": "claude-opus-4-8",
+  "captured_at": "2026-07-18",
+  "note": "real completion captured for strict replay in unit tests"
+ }
+}
