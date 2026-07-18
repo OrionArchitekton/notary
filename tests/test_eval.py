@@ -227,6 +227,14 @@ def test_same_type_contradiction_off_the_planted_sentence_is_not_a_catch():
         entry, (finding("Customer email address. Never null."),)
     ).outcome == "caught"
 
+    # cycle-2 adversarial regression: a FRAGMENT of the planted sentence
+    # ("null.", bare punctuation) must NOT count as a catch; the claimed
+    # sentence has to contain the full planted assertion
+    frag = score_entry(entry, (finding("null."),))
+    assert frag.outcome == "missed"
+    assert frag.off_target_contradictions == 1
+    assert score_entry(entry, (finding("."),)).outcome == "missed"
+
 
 def test_untyped_manifest_entry_is_rejected_fast():
     """Fleet-review regression (abstained A3, adjudicated inline): the seeder

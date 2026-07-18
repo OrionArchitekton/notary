@@ -63,17 +63,20 @@ def score_entry(entry: CatalogEntry, findings: tuple[Finding, ...],
                 extraction_error: str | None = None) -> EntryResult:
     """Pure scoring rule: a lie is caught ONLY by a CONTRADICTED finding that
     matches the planted claim: same claim type AND the finding's claimed
-    sentence overlaps the planted sentence (entry.planted_text, defaulting to
-    the whole description). A control trips a false positive on ANY
-    CONTRADICTED finding (its whole description is truthful). Off-target
-    contradictions on a lie entry are disclosed, never credited."""
+    sentence CONTAINS the full planted sentence (entry.planted_text,
+    defaulting to the whole description). Containment is one-directional
+    (cycle-2 adversarial finding: mutual substring let a fragment like
+    "null." be credited against "Never null."). A control trips a false
+    positive on ANY CONTRADICTED finding (its whole description is
+    truthful). Off-target contradictions on a lie entry are disclosed,
+    never credited."""
     target = entry.planted_text or entry.description
 
     def _matches_planted(f: Finding) -> bool:
         return (
             f.verdict is Verdict.CONTRADICTED
             and f.claim.claim_type is entry.claim_type
-            and (target in f.claim.text or f.claim.text in target)
+            and target in f.claim.text
         )
 
     on_target = any(_matches_planted(f) for f in findings)
