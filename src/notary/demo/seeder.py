@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import random
+from datetime import date, timedelta
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -252,14 +253,13 @@ def _seed_refunds(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:
 
 
 def _seed_sessions(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:
-    # latest generated date is 2026-05-28, ~51 days before ANCHOR_DATE:
-    # the freshness lie ("updated daily")
+    # 90 DISTINCT consecutive dates ending 2026-05-28, ~51 days before
+    # ANCHOR_DATE: the freshness lie ("updated daily")
     rows = []
+    start = date(2026, 5, 28) - timedelta(days=89)
     for day in range(90):
-        month = 3 + day // 30  # months 3-5 only
-        dom = 1 + day % 30
-        date = f"2026-{month:02d}-{min(dom, 28):02d}"
-        rows.append((date, rng.randrange(800, 4000),
+        event_date = (start + timedelta(days=day)).isoformat()
+        rows.append((event_date, rng.randrange(800, 4000),
                      rng.randrange(120, 900)))  # seconds despite duration_ms
     con.execute(
         "create table fct_sessions_daily (event_date date, sessions int, "

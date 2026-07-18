@@ -111,3 +111,18 @@ def test_inventory_negative_qty_lie_is_actually_planted(built):
     finally:
         con.close()
     assert negatives >= 3
+
+
+def test_sessions_rollup_dates_are_distinct_and_daily(built):
+    """Bot-thread regression: the daily rollup must have one row per date."""
+    db, _ = built
+    con = duckdb.connect(str(db), read_only=True)
+    try:
+        total, distinct, latest = con.execute(
+            "select count(*), count(distinct event_date), max(event_date) "
+            "from fct_sessions_daily"
+        ).fetchone()
+    finally:
+        con.close()
+    assert total == distinct == 90
+    assert str(latest) == "2026-05-28"
