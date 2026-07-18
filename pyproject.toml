@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "notary"
+version = "0.1.0"
+description = "The context lie detector: verifies data-catalog claims against measured reality and writes verdicts back to DataHub"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "acryl-datahub==1.6.0.15",
+    "mcp-server-datahub==0.6.0",
+    "mcp>=1.0",
+    "duckdb>=1.0",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/notary"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires a live local DataHub quickstart (skipped when absent)",
+]
