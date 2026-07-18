@@ -17,7 +17,15 @@ import duckdb
 
 from notary.adjudicate import adjudicate
 from notary.demo.seeder import DEFAULT_SEED, MANIFEST, CatalogEntry, Manifest, build_warehouse
-from notary.extract import LLMClient, ReplayLLM, extract_claims
+from notary.extract import (
+    KNOWN_UNCAPTURABLE,
+    SYSTEM_PROMPT,
+    LLMClient,
+    ReplayLLM,
+    _prompt_key,
+    _user_prompt,
+    extract_claims,
+)
 from notary.probe import plan_probe, run_probe
 from notary.types import ClaimType, Finding, Verdict
 
@@ -44,39 +52,45 @@ class EntryResult:
     # extraction drop (lie -> missed, control -> clean) but disclosed in the
     # published table so it never reads as a verified result.
     extraction_error: str | None = None
-    # CONTRADICTED findings whose claim type differs from the entry's planted
-    # claim type (fleet-review finding: without this, a future rubric's false
-    # positive against a truthful secondary sentence would be laundered into
-    # 'caught' in the wrong row). Never counted as a catch; disclosed.
-    off_type_contradictions: int = 0
+    # CONTRADICTED findings that do not match the planted claim, by type or
+    # by sentence (fleet + pipeline findings: without this, a future rubric's
+    # false positive against a truthful sentence, of a DIFFERENT type or the
+    # SAME type, would be laundered into 'caught'). Never credited; disclosed.
+    off_target_contradictions: int = 0
 
 
 def score_entry(entry: CatalogEntry, findings: tuple[Finding, ...],
                 extraction_error: str | None = None) -> EntryResult:
-    """Pure scoring rule: a lie is caught ONLY by a CONTRADICTED finding of
-    the entry's own claim type; a control trips a false positive on ANY
-    CONTRADICTED finding (its whole description is truthful). Off-type
+    """Pure scoring rule: a lie is caught ONLY by a CONTRADICTED finding that
+    matches the planted claim: same claim type AND the finding's claimed
+    sentence overlaps the planted sentence (entry.planted_text, defaulting to
+    the whole description). A control trips a false positive on ANY
+    CONTRADICTED finding (its whole description is truthful). Off-target
     contradictions on a lie entry are disclosed, never credited."""
-    on_type = any(
-        f.verdict is Verdict.CONTRADICTED
-        and f.claim.claim_type is entry.claim_type
-        for f in findings
-    )
-    off_type = sum(
+    target = entry.planted_text or entry.description
+
+    def _matches_planted(f: Finding) -> bool:
+        return (
+            f.verdict is Verdict.CONTRADICTED
+            and f.claim.claim_type is entry.claim_type
+            and (target in f.claim.text or f.claim.text in target)
+        )
+
+    on_target = any(_matches_planted(f) for f in findings)
+    off_target = sum(
         1 for f in findings
-        if f.verdict is Verdict.CONTRADICTED
-        and f.claim.claim_type is not entry.claim_type
+        if f.verdict is Verdict.CONTRADICTED and not _matches_planted(f)
     )
     if entry.planted_lie:
-        outcome = CAUGHT if on_type else MISSED
+        outcome = CAUGHT if on_target else MISSED
     else:
-        outcome = FALSE_POSITIVE if (on_type or off_type) else CLEAN
+        outcome = FALSE_POSITIVE if (on_target or off_target) else CLEAN
     return EntryResult(
         entry=entry,
         findings=findings,
         outcome=outcome,
         extraction_error=extraction_error,
-        off_type_contradictions=off_type,
+        off_target_contradictions=off_target,
     )
 
 
@@ -134,20 +148,29 @@ class EvalReport:
                 f"extraction ({names}); scored fail-closed "
                 f"(lie counts as missed, control counts as clean), not verified."
             )
-        # controls' off-type contradictions are already visible as false
+        # controls' off-target contradictions are already visible as false
         # positives in the table; the invisible case is a lie entry's
-        off_type = sum(
-            r.off_type_contradictions for r in self.entries
+        off_target = sum(
+            r.off_target_contradictions for r in self.entries
             if r.entry.planted_lie
         )
-        if off_type:
+        if off_target:
             lines.append("")
             lines.append(
-                f"{off_type} off-type contradiction(s) on planted-lie entries "
-                f"(a CONTRADICTED verdict whose claim type differs from the "
-                f"planted lie); disclosed here, never counted as caught."
+                f"{off_target} off-target contradiction(s) on planted-lie "
+                f"entries (a CONTRADICTED verdict that does not match the "
+                f"planted claim's type and sentence); disclosed here, never "
+                f"counted as caught."
             )
         return "\n".join(lines)
+
+
+def _entry_prompt_key(entry: CatalogEntry) -> str:
+    """The replay-store key for an entry's extraction prompt."""
+    urn = _URN_TEMPLATE.format(table=entry.table)
+    return _prompt_key(
+        SYSTEM_PROMPT, _user_prompt(urn, entry.column, entry.description)
+    )
 
 
 def evaluate(
@@ -204,15 +227,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Fleet-review fix (fail-open exit code): a missing or empty fixtures
-    # store is a setup error, not an eval result. Without this guard the run
-    # prints a degenerate all-miss table and exits 0, which any script
-    # consuming the exit code reads as a valid evaluation.
+    # Fleet + pipeline fix (fail-open exit code): the fixtures store must
+    # carry EVERY prompt the manifest requires, except the declared
+    # provider-blocked keys. Without this a partially populated (or wrong)
+    # store changes the table and still exits 0, which any script consuming
+    # the exit code reads as a valid evaluation.
     fixtures = Path(args.fixtures)
     if not fixtures.is_dir() or not any(fixtures.glob("*.json")):
         print(
             f"error: fixtures directory {fixtures} is missing or has no "
             f"captured completions; run from the repo root or pass --fixtures",
+            file=sys.stderr,
+        )
+        return 2
+    missing = [
+        f"{e.table}.{e.column or '(table)'}"
+        for e in MANIFEST.claims
+        if _entry_prompt_key(e) not in KNOWN_UNCAPTURABLE
+        and not (fixtures / f"{_entry_prompt_key(e)}.json").exists()
+    ]
+    if missing:
+        print(
+            f"error: fixtures store {fixtures} is missing captured "
+            f"completions for: {', '.join(missing)}; refusing to score a "
+            f"partial run as a valid evaluation",
             file=sys.stderr,
         )
         return 2
@@ -226,10 +264,18 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         con.close()
     print(report.to_markdown())
-    if all(r.extraction_error for r in report.entries):
+    unexpected = [
+        r for r in report.entries
+        if r.extraction_error
+        and _entry_prompt_key(r.entry) not in KNOWN_UNCAPTURABLE
+    ]
+    if unexpected:
+        names = ", ".join(
+            f"{r.entry.table}.{r.entry.column or '(table)'}" for r in unexpected
+        )
         print(
-            "error: every entry failed extraction; the table above verified "
-            "nothing (wrong fixtures store?)",
+            f"error: extraction failed unexpectedly for {names}; the table "
+            f"above is disclosed but this run is not a valid evaluation",
             file=sys.stderr,
         )
         return 3

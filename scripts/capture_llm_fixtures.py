@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from notary.demo.seeder import MANIFEST  # noqa: E402
 from notary.extract import (  # noqa: E402
+    KNOWN_UNCAPTURABLE as KNOWN_BLOCKED,
     SYSTEM_PROMPT,
     AnthropicLLM,
     CaptureLLM,
@@ -30,15 +31,6 @@ from notary.extract import (  # noqa: E402
     _prompt_key,
     _user_prompt,
 )
-
-# Prompt keys the provider permanently refuses (fleet-review fix: without
-# this list a clean exit 0 is unreachable and a NEW capture failure is
-# indistinguishable by exit code from the known block).
-KNOWN_BLOCKED = {
-    # dim_customers.country_code "ISO-3166 alpha-2 country code.":
-    # content-filter 400, deterministic across 3 attempts on 2026-07-18
-    "18a856fd6bfc4054c9a7798f",
-}
 
 _URN_TEMPLATE = (
     "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.{table},PROD)"

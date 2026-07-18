@@ -157,10 +157,10 @@ def test_extraction_failure_is_isolated_and_reported(warehouse):
     assert "extraction" not in clean_md.lower()
 
 
-def test_off_type_contradiction_is_not_a_catch_and_is_disclosed():
+def test_off_target_contradiction_is_not_a_catch_and_is_disclosed():
     """Fleet-review regression (confirmed WARNING, eval.py:128): a lie entry
-    is caught ONLY by a CONTRADICTED finding of the entry's own claim type.
-    An off-type CONTRADICTED (a future rubric's false positive against a
+    is caught ONLY by a CONTRADICTED finding matching the planted claim. An
+    off-type CONTRADICTED (a future rubric's false positive against a
     truthful secondary sentence) must not launder into 'caught', and must be
     disclosed in the table."""
     from notary.eval import EvalReport, score_entry
@@ -180,16 +180,52 @@ def test_off_type_contradiction_is_not_a_catch_and_is_disclosed():
 
     off = score_entry(entry, (finding(ClaimType.DOMAIN_ENUM),))
     assert off.outcome == "missed"  # NOT caught
-    assert off.off_type_contradictions == 1
+    assert off.off_target_contradictions == 1
 
     on = score_entry(entry, (finding(ClaimType.UNIT_SCALE),))
     assert on.outcome == "caught"
-    assert on.off_type_contradictions == 0
+    assert on.off_target_contradictions == 0
 
     md = EvalReport(entries=(off,)).to_markdown()
-    assert "off-type" in md.lower()  # disclosed
+    assert "off-target" in md.lower()  # disclosed
     clean_md = EvalReport(entries=(on,)).to_markdown()
-    assert "off-type" not in clean_md.lower()
+    assert "off-target" not in clean_md.lower()
+
+
+def test_same_type_contradiction_off_the_planted_sentence_is_not_a_catch():
+    """Pipeline regression (Codex HIGH): a CONTRADICTED finding of the SAME
+    claim type against a truthful secondary sentence must not be credited as
+    catching the planted lie. The catch must match the planted sentence."""
+    from notary.demo.seeder import CatalogEntry
+    from notary.eval import score_entry
+    from notary.types import Claim, Finding, Verdict
+
+    entry = CatalogEntry(
+        "dim_customers", "email", "Customer email address. Never null.",
+        True, ClaimType.COMPLETENESS, "~5 percent null",
+        planted_text="Never null.",
+    )
+    urn = "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.dim_customers,PROD)"
+
+    def finding(text):
+        return Finding(
+            claim=Claim(
+                asset_urn=urn, field_path="email",
+                claim_type=ClaimType.COMPLETENESS, text=text, predicate={},
+            ),
+            verdict=Verdict.CONTRADICTED, evidence={}, rationale="synthetic",
+        )
+
+    # same type, different sentence: NOT a catch, disclosed
+    off = score_entry(entry, (finding("Customer email address."),))
+    assert off.outcome == "missed"
+    assert off.off_target_contradictions == 1
+
+    # the planted sentence itself (or a quote containing it): a catch
+    assert score_entry(entry, (finding("Never null."),)).outcome == "caught"
+    assert score_entry(
+        entry, (finding("Customer email address. Never null."),)
+    ).outcome == "caught"
 
 
 def test_untyped_manifest_entry_is_rejected_fast():
@@ -228,22 +264,71 @@ def test_cli_fails_fast_on_missing_or_empty_fixtures_dir(tmp_path):
     assert emptied.returncode == 2
 
 
-def test_cli_exits_nonzero_when_every_entry_fails_extraction(tmp_path):
-    """Companion regression: fixtures dir exists but matches no prompt, so
-    every entry errors. The table still prints (disclosed) but the process
-    signal must be failure, not success."""
+def test_cli_rejects_partially_populated_fixture_store(tmp_path):
+    """Pipeline regression (P1 thread PRRT..2P + Codex HIGH x2): a store
+    missing ANY required prompt fixture beyond the known provider block is a
+    setup error. Without this gate, deleting one fixture (or pointing at a
+    store with a single matching key) changes the table and still exits 0."""
+    import shutil
+
+    root = Path(__file__).parent.parent
     fx = tmp_path / "fx"
-    fx.mkdir()
-    (fx / "0000000000000000000000ff.json").write_text(
+    shutil.copytree(root / "tests/fixtures/llm", fx)
+    # remove one required, non-blocked fixture (the cents-lie prompt)
+    from notary.extract import SYSTEM_PROMPT, _prompt_key, _user_prompt
+
+    urn = "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)"
+    key = _prompt_key(
+        SYSTEM_PROMPT, _user_prompt(urn, "amount", "Transaction amount in USD.")
+    )
+    (fx / f"{key}.json").unlink()
+
+    r = subprocess.run(
+        [sys.executable, "-m", "notary.eval",
+         "--db", str(tmp_path / "wh.duckdb"), "--fixtures", str(fx)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert r.returncode == 2
+    assert "amount" in r.stderr  # names what is missing
+    assert "| claim type |" not in r.stdout
+
+    # a store with no matching keys at all fails the same way
+    bogus = tmp_path / "bogus"
+    bogus.mkdir()
+    (bogus / "0000000000000000000000ff.json").write_text(
         json.dumps({"completion": "[]"})
     )
+    r2 = subprocess.run(
+        [sys.executable, "-m", "notary.eval",
+         "--db", str(tmp_path / "wh.duckdb"), "--fixtures", str(bogus)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert r2.returncode == 2
+
+
+def test_cli_exits_nonzero_on_unexpected_extraction_failure(tmp_path):
+    """Companion regression: all required fixtures present, but one is
+    malformed, so its entry errors at extraction. The table still prints
+    (disclosed) but the process signal must be failure, not success."""
+    import shutil
+
+    root = Path(__file__).parent.parent
+    fx = tmp_path / "fx"
+    shutil.copytree(root / "tests/fixtures/llm", fx)
+    from notary.extract import SYSTEM_PROMPT, _prompt_key, _user_prompt
+
+    urn = "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)"
+    key = _prompt_key(
+        SYSTEM_PROMPT, _user_prompt(urn, "amount", "Transaction amount in USD.")
+    )
+    (fx / f"{key}.json").write_text(json.dumps({"completion": "not json ["}))
+
     r = subprocess.run(
         [sys.executable, "-m", "notary.eval",
          "--db", str(tmp_path / "wh.duckdb"), "--fixtures", str(fx)],
         capture_output=True, text=True, timeout=120,
     )
     assert "| claim type |" in r.stdout  # still disclosed
-    assert "17 of 17" in r.stdout
     assert r.returncode == 3
 
 

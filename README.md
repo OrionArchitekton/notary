@@ -33,10 +33,11 @@ The demo warehouse plants 12 catalog lies across 5 claim types, plus 5 truthful
 controls ([the manifest](src/notary/demo/seeder.py) is the ground truth). One
 command reproduces this table: it rebuilds the warehouse from a fixed seed,
 replays the captured Claude extractions verbatim (no network, no key), probes,
-adjudicates, and scores every entry:
+adjudicates, and scores every entry. From a clean checkout:
 
 ```
-python -m notary.eval
+uv venv && uv pip install -e '.[dev]'   # or: pip install -e '.[dev]'
+.venv/bin/python -m notary.eval
 ```
 
 | claim type | planted lies | caught | missed | controls | false positives |

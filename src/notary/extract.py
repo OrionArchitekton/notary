@@ -44,6 +44,14 @@ def _prompt_key(system: str, user: str) -> str:
     return hashlib.sha256((system + "\x00" + user).encode()).hexdigest()[:24]
 
 
+# Prompt keys the provider permanently refuses to complete (content-filter
+# 400, deterministic across attempts). Shared by the capture script (skip +
+# exclude from the failure exit code) and the eval CLI (allow the fixture to
+# be absent without failing the required-store gate). One entry:
+# dim_customers.country_code "ISO-3166 alpha-2 country code." (2026-07-18).
+KNOWN_UNCAPTURABLE = frozenset({"18a856fd6bfc4054c9a7798f"})
+
+
 class ReplayLLM:
     """Strict replay of captured completions.
 
@@ -175,6 +183,11 @@ _UNIT_SURFACE_FORMS: dict[str, tuple[str, ...]] = {
     "percent_0_100": ("percent", "%"),
 }
 
+# percent_0_100 encodes a RANGE as well as a unit (pipeline finding: the
+# surface word "percent" alone does not entail the 0-to-100 scale; the
+# sentence must state the range or the LLM could invent it).
+_PERCENT_RANGE_RE = re.compile(r"\b0\s*(?:and|to|-)\s*100\b", re.IGNORECASE)
+
 
 def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
     if not isinstance(predicate, dict):
@@ -188,6 +201,8 @@ def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
             return False
         surface_forms = _UNIT_SURFACE_FORMS.get(unit.lower(), (unit,))
         if not any(f.upper() in text.upper() for f in surface_forms):
+            return False
+        if unit.lower() == "percent_0_100" and not _PERCENT_RANGE_RE.search(text):
             return False
     if claim_type is ClaimType.FRESHNESS:
         cadence = predicate.get("cadence")
