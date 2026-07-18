@@ -139,70 +139,134 @@ def ingest_manifest(db_path: str | Path, manifest, gms_url: str) -> list[str]:
 
 
 class NotaryWriter:
-    """Write a Finding back to the graph through the MCP mutation tools."""
+    """Write an asset's Findings back to the graph through the MCP tools.
+
+    Aggregation happens per ASSET before any write (review finding: the
+    verdict property is SINGLE-cardinality per asset, so per-finding writes
+    were last-write-wins). Sequence is ledger-gated: if the ledger write
+    fails, no dossier or description mutation is attempted. UNVERIFIABLE
+    findings produce no dossier and no description change (spec S3).
+    """
 
     def __init__(self, gms_url: str):
         self.gms_url = gms_url
 
-    async def write_finding(self, finding) -> dict:
+    async def write_findings(self, asset_urn: str, findings: list) -> dict:
+        if not findings:
+            return {"ledger": None, "documents": [], "descriptions": []}
+        if any(f.claim.asset_urn != asset_urn for f in findings):
+            raise ValueError("write_findings takes findings for ONE asset")
+
+        run_date = _run_date()
+        verdict = _aggregate_verdict(findings)
+        dossier_findings = [
+            f for f in findings if f.verdict.value in ("CONTRADICTED", "CONFIRMED")
+        ]
+        doc_titles = {
+            id(f): (
+                f"Notary evidence: {_short_asset(asset_urn)}."
+                f"{f.claim.field_path or '(table)'} ({run_date})"
+            )
+            for f in dossier_findings
+        }
+        evidence_value = (
+            "; ".join(doc_titles.values())
+            if doc_titles
+            else "no dossier (all UNVERIFIABLE)"
+        )
+
+        receipt: dict = {"documents": [], "descriptions": []}
+        async with self._session() as session:
+            res = await session.call_tool(
+                "add_structured_properties",
+                {
+                    "property_values": {
+                        TRUST_VERDICT_URN: [verdict],
+                        TRUST_VERIFIED_AT_URN: [run_date],
+                        TRUST_EVIDENCE_URN: [evidence_value],
+                    },
+                    "entity_urns": [asset_urn],
+                },
+            )
+            receipt["ledger"] = not res.isError
+            if res.isError:
+                # Ledger is the anchor: without it, evidence and corrected
+                # descriptions would be unattributed. Stop here.
+                return receipt
+
+            for f in dossier_findings:
+                res = await session.call_tool(
+                    "save_document",
+                    {
+                        "document_type": "Analysis",
+                        "title": doc_titles[id(f)],
+                        "content": _dossier_markdown(f, run_date),
+                        "related_assets": [asset_urn],
+                    },
+                )
+                receipt["documents"].append(
+                    {"title": doc_titles[id(f)], "ok": not res.isError}
+                )
+
+            all_docs_ok = all(d["ok"] for d in receipt["documents"])
+            for f in findings:
+                if (
+                    f.verdict.value == "CONTRADICTED"
+                    and f.claim.field_path
+                    and all_docs_ok
+                ):
+                    res = await session.call_tool(
+                        "update_description",
+                        {
+                            "entity_urn": asset_urn,
+                            "operation": "replace",
+                            "column_path": f.claim.field_path,
+                            "description": _corrected_description(f, run_date),
+                        },
+                    )
+                    receipt["descriptions"].append(
+                        {"field": f.claim.field_path, "ok": not res.isError}
+                    )
+        return receipt
+
+    def _session(self):
+        from contextlib import asynccontextmanager
+
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
-        run_date = _run_date()
-        claim = finding.claim
-        doc_title = (
-            f"Notary evidence: {_short_asset(claim.asset_urn)}.{claim.field_path} "
-            f"({run_date})"
-        )
-        env = dict(os.environ)
+        # Minimal child env: the MCP server needs no inherited secrets
+        # (review finding: passing the full parent env is a spill surface).
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k in ("PATH", "HOME", "LANG", "LC_ALL", "VIRTUAL_ENV")
+        }
         env["DATAHUB_GMS_URL"] = self.gms_url
         env["TOOLS_IS_MUTATION_ENABLED"] = "true"
         params = StdioServerParameters(
             command=sys.executable, args=["-m", "mcp_server_datahub"], env=env
         )
-        receipt: dict = {}
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
 
-                res = await session.call_tool(
-                    "add_structured_properties",
-                    {
-                        "property_values": {
-                            TRUST_VERDICT_URN: [finding.verdict.value],
-                            TRUST_VERIFIED_AT_URN: [run_date],
-                            TRUST_EVIDENCE_URN: [doc_title],
-                        },
-                        "entity_urns": [claim.asset_urn],
-                    },
-                )
-                receipt["ledger"] = not res.isError
+        @asynccontextmanager
+        async def _ctx():
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
 
-                res = await session.call_tool(
-                    "save_document",
-                    {
-                        "document_type": "Analysis",
-                        "title": doc_title,
-                        "content": _dossier_markdown(finding, run_date),
-                        "related_assets": [claim.asset_urn],
-                    },
-                )
-                receipt["document"] = not res.isError
+        return _ctx()
 
-                if finding.verdict.value == "CONTRADICTED" and claim.field_path:
-                    res = await session.call_tool(
-                        "update_description",
-                        {
-                            "entity_urn": claim.asset_urn,
-                            "operation": "replace",
-                            "column_path": claim.field_path,
-                            "description": _corrected_description(finding, run_date),
-                        },
-                    )
-                    receipt["description"] = not res.isError
-                else:
-                    receipt["description"] = None
-        return receipt
+
+def _aggregate_verdict(findings: list) -> str:
+    values = {f.verdict.value for f in findings}
+    if "CONTRADICTED" in values:
+        return "MIXED" if "CONFIRMED" in values else "CONTRADICTED"
+    if values == {"CONFIRMED"}:
+        return "CONFIRMED"
+    if "CONFIRMED" in values:
+        return "MIXED"
+    return "UNVERIFIABLE"
 
 
 def _short_asset(urn: str) -> str:
@@ -212,34 +276,39 @@ def _short_asset(urn: str) -> str:
 
 def _dossier_markdown(finding, run_date: str) -> str:
     claim = finding.claim
+    probe_sql = finding.evidence.get("probe_sql", "(no probe SQL recorded)")
     return (
         f"# Notary evidence dossier\n\n"
         f"- Asset: {claim.asset_urn}\n"
-        f"- Field: {claim.field_path}\n"
-        f"- Claim ({claim.claim_type.value}): \"{claim.text}\"\n"
+        f"- Field: {claim.field_path or '(table-level)'}\n"
+        f'- Claim ({claim.claim_type.value}): "{claim.text}"\n'
         f"- Verdict: {finding.verdict.value}\n"
         f"- Run date: {run_date}\n"
         f"- Rationale: {finding.rationale}\n\n"
-        f"## Probe SQL\n\n```sql\n{_probe_sql(finding)}\n```\n\n"
-        f"## Measurements\n\n```json\n{json.dumps(finding.evidence, indent=1, default=str)}\n```\n\n"
+        f"## Probe SQL\n\n```sql\n{probe_sql}\n```\n\n"
+        f"## Measurements\n\n```json\n"
+        f"{json.dumps(finding.evidence, indent=1, default=str)}\n```\n\n"
         f"Written by Notary (the context lie detector). This dossier is "
         f"machine-generated evidence; the next agent reading this asset "
         f"inherits it.\n"
     )
 
 
-def _probe_sql(finding) -> str:
-    # evidence carries measurements; the SQL travels on the spec when present
-    return getattr(getattr(finding, "probe_spec", None), "sql", "") or "(see probe module)"
-
-
 def _corrected_description(finding, run_date: str) -> str:
+    """Evidence-grounded correction: state the measurements, never assert a
+    unit as fact (review finding: the previous hardcoded 'integer cents'
+    text could write a fabrication under Notary authority)."""
     claim = finding.claim
-    if "cents" in finding.rationale:
-        corrected = "Transaction amount in integer cents."
-    else:
-        corrected = f"[claim under review: {claim.text}]"
+    median = finding.evidence.get("median")
+    integer_share = finding.evidence.get("integer_share")
+    measured = (
+        f"measured median {median:.0f} with integer_share {integer_share:.2f}"
+        if median is not None and integer_share is not None
+        else "measurements in the Notary evidence dossier"
+    )
     return (
-        f"{corrected} [Corrected by Notary {run_date}: previous description "
-        f"said \"{claim.text}\" but {finding.rationale}.]"
+        f"[Contradicted by Notary {run_date}] The prior description said "
+        f'"{claim.text}", but the stored values are inconsistent with it '
+        f"({measured}; {finding.rationale}). See the Notary evidence dossier "
+        f"before trusting either statement."
     )

@@ -81,3 +81,36 @@ def test_probe_sql_is_read_only(warehouse):
     sql = plan_probe(claim).sql.lower()
     for banned in ("insert", "update", "delete", "drop", "create", "alter"):
         assert banned not in sql
+
+
+def test_smallcents_distribution_is_unverifiable_not_confirmed(warehouse):
+    """Review regression: a distribution matching NEITHER signature must fall
+    to UNVERIFIABLE, never to CONFIRMED-by-complement (fail-open)."""
+    claim = _claim("stg_inventory", "qty", "Value in USD.", "USD")
+    finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_allnull_column_is_unverifiable_not_a_crash(tmp_path):
+    """Review regression: an all-NULL probed column returns UNVERIFIABLE
+    instead of raising TypeError on float(None)."""
+    db = tmp_path / "nulls.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table t (amount double)")
+    con.execute("insert into t values (NULL), (NULL)")
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = _claim("t", "amount", "Amount in USD.", "USD")
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_evidence_carries_probe_sql(warehouse):
+    """Review regression: the dossier's probe SQL comes from evidence, so the
+    finding must carry it."""
+    claim = _claim("fct_payments", "amount", "Transaction amount in USD.", "USD")
+    finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
+    assert "fct_payments" in finding.evidence["probe_sql"]

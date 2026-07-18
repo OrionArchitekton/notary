@@ -97,3 +97,17 @@ def test_manifest_round_trips_to_json(built, tmp_path):
     p.write_text(manifest.to_json())
     loaded = json.loads(p.read_text())
     assert len(loaded["claims"]) == len(manifest.claims)
+
+
+def test_inventory_negative_qty_lie_is_actually_planted(built):
+    """Review regression: the manifest promised negative oversell values but
+    the default seed happened to generate none; the plant is now forced."""
+    db, _ = built
+    con = duckdb.connect(str(db), read_only=True)
+    try:
+        negatives = con.execute(
+            "select count(*) from stg_inventory where qty < 0"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert negatives >= 3

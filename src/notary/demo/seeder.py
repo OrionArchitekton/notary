@@ -51,7 +51,7 @@ ENTRIES: tuple[CatalogEntry, ...] = (
     CatalogEntry("fct_payments", "amount",
                  "Transaction amount in USD.",
                  True, ClaimType.UNIT_SCALE,
-                 "stored as integer cents (median ~= 4800, no fractional part)"),
+                 "stored as integer cents (median ~= 12800, no fractional part)"),
     CatalogEntry("fct_payments", "currency",
                  "ISO-4217 currency code, one of {USD, EUR, GBP}.",
                  False, ClaimType.DOMAIN_ENUM,
@@ -86,7 +86,7 @@ ENTRIES: tuple[CatalogEntry, ...] = (
     CatalogEntry("fct_sessions_daily", None,
                  "Daily session rollup. Updated daily.",
                  True, ClaimType.FRESHNESS,
-                 "latest event_date is ~45 days stale"),
+                 "latest event_date is ~51 days stale"),
     CatalogEntry("fct_sessions_daily", "duration_ms",
                  "Session duration in milliseconds.",
                  True, ClaimType.UNIT_SCALE,
@@ -104,7 +104,7 @@ ENTRIES: tuple[CatalogEntry, ...] = (
     CatalogEntry("dim_products", "weight_grams",
                  "Item shipping weight in grams.",
                  True, ClaimType.UNIT_SCALE,
-                 "stored in kilograms (median ~= 2.4)"),
+                 "stored in kilograms (median ~= 6)"),
     # fct_refunds
     CatalogEntry("fct_refunds", "amount_cents",
                  "Refund amount in integer cents.",
@@ -244,13 +244,12 @@ def _seed_refunds(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:
 
 
 def _seed_sessions(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:
-    # latest date ~45 days before ANCHOR_DATE (2026-06-03): the freshness lie
+    # latest generated date is 2026-05-28, ~51 days before ANCHOR_DATE:
+    # the freshness lie ("updated daily")
     rows = []
     for day in range(90):
-        month = 3 + day // 30
+        month = 3 + day // 30  # months 3-5 only
         dom = 1 + day % 30
-        if (month, dom) > (6, 3):
-            continue
         date = f"2026-{month:02d}-{min(dom, 28):02d}"
         rows.append((date, rng.randrange(800, 4000),
                      rng.randrange(120, 900)))  # seconds despite duration_ms
@@ -274,8 +273,13 @@ def _seed_legacy_orders(con: duckdb.DuckDBPyConnection, rng: random.Random) -> N
 def _seed_inventory(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:
     rows = []
     for i in range(1, 81):
-        qty = rng.randrange(-5, 500)  # negatives: the non-negative lie
+        qty = rng.randrange(-5, 500)
         rows.append((i, qty, "2026-06-18 06:00:00"))  # ~30 days stale
+    # plant the non-negative lie deterministically: oversold items exist
+    # regardless of what the RNG happened to draw (review finding: the lie
+    # was not actually planted under the default seed)
+    for idx, oversell in ((6, -3), (22, -1), (60, -5)):
+        rows[idx] = (rows[idx][0], oversell, rows[idx][2])
     con.execute(
         "create table stg_inventory (product_id int, qty int, "
         "snapshot_at timestamp)"

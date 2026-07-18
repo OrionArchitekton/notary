@@ -81,8 +81,10 @@ def test_s1_round_trip_writes_verdict_back(ingested, monkeypatch):
     assert finding.verdict is Verdict.CONTRADICTED
 
     writer = NotaryWriter(GMS)
-    receipt = asyncio.run(writer.write_finding(finding))
-    assert receipt["ledger"] and receipt["document"] and receipt["description"]
+    receipt = asyncio.run(writer.write_findings(PAYMENTS_URN, [finding]))
+    assert receipt["ledger"] is True
+    assert receipt["documents"] and all(d["ok"] for d in receipt["documents"])
+    assert receipt["descriptions"] and all(d["ok"] for d in receipt["descriptions"])
 
     # Read back: the graph must carry what Notary learned.
     from datahub.sdk import DataHubClient
