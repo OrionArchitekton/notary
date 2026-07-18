@@ -1,0 +1,9 @@
+{
+ "completion": "[{\"claim_type\":\"unit_scale\",\"text\":\"Session duration in milliseconds.\",\"predicate\":{\"unit\":\"milliseconds\"}}]",
+ "user": "Asset: urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_sessions_daily,PROD)\nTarget: column `duration_ms`\nDescription: Session duration in milliseconds.",
+ "meta": {
+  "model": "claude-opus-4-8",
+  "captured_at": "2026-07-18",
+  "note": "real completion captured for strict replay in unit tests"
+ }
+}

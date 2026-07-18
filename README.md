@@ -27,8 +27,39 @@ Agents That Do Real Work). Apache-2.0.
 Under construction (submission window: through 2026-08-10). The spec that governs
 this build: [specs/notary-spec.md](specs/notary-spec.md).
 
+## Honest evaluation
+
+The demo warehouse plants 12 catalog lies across 5 claim types, plus 5 truthful
+controls ([the manifest](src/notary/demo/seeder.py) is the ground truth). One
+command reproduces this table: it rebuilds the warehouse from a fixed seed,
+replays the captured Claude extractions verbatim (no network, no key), probes,
+adjudicates, and scores every entry:
+
+```
+python -m notary.eval
+```
+
+| claim type | planted lies | caught | missed | controls | false positives |
+|---|---|---|---|---|---|
+| unit_scale | 4 | 1 | 3 | 2 | 0 |
+| freshness | 2 | 0 | 2 | 0 | 0 |
+| completeness | 3 | 0 | 3 | 0 | 0 |
+| domain_enum | 2 | 0 | 2 | 3 | 0 |
+| deprecation_usage | 1 | 0 | 1 | 0 | 0 |
+| **total** | 12 | 1 | 11 | 5 | 0 |
+
+1 of 17 entries had no extraction (dim_customers.country_code); scored fail-closed (lie counts as missed, control counts as clean), not verified.
+
+This table is published verbatim, misses included. The current rubric covers
+USD unit-scale claims only: it catches the cents lie with zero false positives
+and honestly reports every claim type it cannot yet verify as missed. Each new
+rubric moves a row from missed to caught; the table is regenerated, never
+hand-edited (a test fails if the README table drifts from the command's
+output). The one unextracted entry is a provider-side content-filter block on
+that exact capture prompt (deterministic across three attempts); it is scored
+fail-closed and disclosed rather than dropped from the denominator.
+
 ## Planned quick start
 
-Instructions land here with the first working slice: local DataHub quickstart,
-seeded demo warehouse with planted lies, one command to run Notary, one command
-to reproduce the evaluation table.
+Full instructions land with the write-back demo: local DataHub quickstart,
+seeded demo warehouse with planted lies, one command to run Notary end to end.

@@ -1,0 +1,9 @@
+{
+ "completion": "[{\"claim_type\":\"deprecation_usage\",\"text\":\"DEPRECATED 2025: superseded by fct_orders. No longer used.\",\"predicate\":{\"deprecated\":true}}]",
+ "user": "Asset: urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.legacy_orders_v1,PROD)\nTarget: the table itself\nDescription: DEPRECATED 2025: superseded by fct_orders. No longer used.",
+ "meta": {
+  "model": "claude-opus-4-8",
+  "captured_at": "2026-07-18",
+  "note": "real completion captured for strict replay in unit tests"
+ }
+}
