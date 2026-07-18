@@ -199,6 +199,21 @@ _UNIT_SURFACE_FORMS: dict[str, tuple[str, ...]] = {
 # sentence must state the range or the LLM could invent it).
 _PERCENT_RANGE_RE = re.compile(r"\b0\s*(?:and|to|-)\s*100\b", re.IGNORECASE)
 
+# Stated surface forms that entail a never-null predicate / a min-of-zero
+# bound. A predicate whose value is not stated in the claimed sentence is
+# dropped, never probed.
+_NEVER_NULL_FORMS = (
+    "never null", "not null", "non-null", "always populated", "required",
+)
+_MIN_ZERO_FORMS = ("non-negative", "nonnegative", "never negative", ">= 0")
+
+
+def _number_stated(bound: float, low_text: str) -> bool:
+    """The literal number appears in the claimed sentence."""
+    if float(bound).is_integer():
+        return str(int(bound)) in low_text
+    return str(bound) in low_text
+
 
 def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
     if not isinstance(predicate, dict):
@@ -219,15 +234,43 @@ def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
         cadence = predicate.get("cadence")
         if not isinstance(cadence, str) or cadence.lower() not in text.lower():
             return False
+    if claim_type is ClaimType.COMPLETENESS:
+        nullable = predicate.get("nullable")
+        if not isinstance(nullable, bool):
+            return False
+        # entailment (PR3 cycle-2 finding: a shape-only bool lets a
+        # completion quote a claim-free sentence and fabricate
+        # nullable:false, manufacturing CONTRADICTED verdicts): a never-null
+        # predicate must be STATED in the claimed sentence
+        if nullable is False and not any(
+            form in text.lower() for form in _NEVER_NULL_FORMS
+        ):
+            return False
+        return True
     if claim_type is ClaimType.DOMAIN_ENUM:
+        low = text.lower()
         values = predicate.get("values")
-        has_enum = isinstance(values, list) and all(
-            isinstance(v, (str, int, float)) for v in values
-        )
-        has_bound = any(
-            isinstance(predicate.get(k), (int, float)) for k in ("min", "max")
-        )
-        return has_enum or has_bound
+        if (
+            isinstance(values, list)
+            and values
+            and all(isinstance(v, (str, int, float)) for v in values)
+        ):
+            # every claimed value must appear in the claimed sentence
+            return all(str(v).lower() in low for v in values)
+        has_bound = False
+        for key in ("min", "max"):
+            bound = predicate.get(key)
+            if isinstance(bound, bool) or not isinstance(bound, (int, float)):
+                continue
+            has_bound = True
+            stated = _number_stated(bound, low) or (
+                key == "min"
+                and bound == 0
+                and any(form in low for form in _MIN_ZERO_FORMS)
+            )
+            if not stated:
+                return False
+        return has_bound
     return all(
         isinstance(predicate.get(key), typ)
         for key, typ in _PREDICATE_SHAPES[claim_type]

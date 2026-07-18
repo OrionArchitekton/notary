@@ -9,6 +9,8 @@ extractor is deleted), these tests fail rather than green-wash. Fixtures are
 real captured completions (scripts/capture_llm_fixtures.py), disclosed in
 their sidecar metadata.
 """
+import json
+
 import pytest
 
 from notary.extract import ReplayLLM, UnknownPromptError, extract_claims
@@ -174,3 +176,85 @@ def test_replay_fixture_must_match_its_prompt(tmp_path):
     llm = ReplayLLM(tmp_path)
     with _pytest.raises(ValueError, match="prompt"):
         llm.complete(SYSTEM_PROMPT, "prompt A")
+
+
+def test_fabricated_nullable_predicate_is_dropped():
+    """PR3 cycle-2 regression (Codex HIGH): a completeness predicate must be
+    entailed by the quoted sentence. Quoting a real but claim-free sentence
+    while supplying nullable:false would otherwise manufacture CONTRADICTED
+    verdicts downstream."""
+    canned = (
+        '[{"claim_type": "completeness", '
+        '"text": "Customer email address.", '
+        '"predicate": {"nullable": false}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.dim_customers,PROD)",
+        descriptions={"email": "Customer email address."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []
+
+
+def test_stated_never_null_predicate_survives():
+    """Companion: the stated forms in the seeded catalog (never null, always
+    populated, required) entail nullable:false and survive."""
+    for text in ("Never null.", "Always populated.", "Required field."):
+        canned = json.dumps([{
+            "claim_type": "completeness",
+            "text": text,
+            "predicate": {"nullable": False},
+        }])
+        claims = extract_claims(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            descriptions={"c": text},
+            llm=_CannedLLM(canned),
+        )
+        assert len(claims) == 1, text
+
+
+def test_fabricated_enum_values_are_dropped():
+    """PR3 cycle-2 regression: every claimed enum value must appear in the
+    quoted sentence; invented values are dropped."""
+    canned = (
+        '[{"claim_type": "domain_enum", '
+        '"text": "Order status, one of {placed, shipped}.", '
+        '"predicate": {"values": ["placed", "shipped", "cancelled"]}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_orders,PROD)",
+        descriptions={"status": "Order status, one of {placed, shipped}."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []
+
+
+def test_fabricated_numeric_bound_is_dropped():
+    """PR3 cycle-2 regression: a numeric bound must be stated in the quoted
+    sentence (literally, or via non-negative language for min 0)."""
+    canned = (
+        '[{"claim_type": "domain_enum", '
+        '"text": "Units on hand.", '
+        '"predicate": {"min": 0}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.stg_inventory,PROD)",
+        descriptions={"qty": "Units on hand."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []
+
+
+def test_nonnegative_language_entails_min_zero():
+    """Companion: 'Non-negative.' states min 0 and survives."""
+    canned = (
+        '[{"claim_type": "domain_enum", '
+        '"text": "Units on hand. Non-negative.", '
+        '"predicate": {"min": 0}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.stg_inventory,PROD)",
+        descriptions={"qty": "Units on hand. Non-negative."},
+        llm=_CannedLLM(canned),
+    )
+    assert len(claims) == 1

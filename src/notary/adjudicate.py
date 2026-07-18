@@ -370,7 +370,12 @@ def _adjudicate_freshness(claim: Claim, result: ProbeResult) -> Finding:
             f"UNVERIFIABLE (a capped-scan max can understate staleness; "
             f"with multiple temporal columns nothing identifies the refresh "
             f"marker, and staleness of the max across ALL columns is only "
-            f"an upper bound, valid for contradiction alone)"
+            f"an upper bound, valid for contradiction alone). "
+            f"Interpretation: this probe verifies the table's temporal DATA "
+            f"keeps pace with the claimed cadence; a pipeline that refreshes "
+            f"without producing new temporal values, or a historical table "
+            f"whose business dates are legitimately old, is outside this "
+            f"probe's evidence"
         ),
     }
     if not scanned_all:
