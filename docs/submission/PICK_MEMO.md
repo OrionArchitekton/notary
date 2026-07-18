@@ -41,12 +41,19 @@ agent-context kit are young and version-pinned; the S1 round-trip integration te
 and the S7 eval table are the proof surface. The one permitted post-freeze
 improvement slice goes here, nothing else.
 
-## Standing constraints from recon (do not violate)
+## Standing constraints from recon + day-0 spike (do not violate)
 
 - Change Proposals review UI is Cloud-only: use direct-but-labeled writes, never
   the proposal tools.
-- Pin DataHub CLI/quickstart to v1.6.0 and the MCP server version at first-green;
-  regenerate the PAT after any CLI upgrade.
+- Pin DataHub CLI/quickstart to v1.6.0 and mcp-server-datahub to 0.6.0 (both
+  verified green 2026-07-18).
+- **Spike finding:** the OSS-mode MCP server registers mutation tools ONLY with
+  `TOOLS_IS_MUTATION_ENABLED=true` (default off: 6 read tools; with flag: 18
+  tools incl. update_description, add_structured_properties, save_document,
+  add_tags). The flag must be set in every run config and documented in setup.
+- **Spike finding:** quickstart runs `METADATA_SERVICE_AUTH_ENABLED=false`, so
+  local runs are tokenless (no PAT needed or creatable); incident raise/resolve
+  verified via OSS GraphQL (`raiseIncident`/`updateIncidentStatus`).
 - A text-to-SQL / chat-with-metadata framing collides with the shipped Analytics
   Agent, never describe Notary in those terms.
 - Recon corpus (private, not in this repo): ~/.orion/notes/datahub-hackathon/.
