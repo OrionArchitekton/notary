@@ -42,6 +42,10 @@ class ProbeSpec:
     claim: Claim
     sql: str  # read-only SQL against the warehouse
     measure_keys: tuple[str, ...]  # names the probe must return
+    # Explicit reference date (ISO) for freshness probes. Always supplied by
+    # the caller (eval anchors to the seeded warehouse's frozen date, live
+    # runs to NOTARY_RUN_DATE); a probe never reads the wall clock itself.
+    as_of: str | None = None
 
 
 @dataclass(frozen=True)

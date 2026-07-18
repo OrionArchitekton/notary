@@ -125,3 +125,180 @@ def test_probe_scan_is_bounded(warehouse):
     result = run_probe(spec, warehouse)
     assert result.measurements["scan_limit"] > 0
     assert result.measurements["row_count"] <= result.measurements["scan_limit"]
+
+
+def test_never_null_lie_is_contradicted(warehouse):
+    """Rubrics slice 1 (completeness): the ONE behavior this locks - a
+    'never null' claim on a column with a real null share is planned into a
+    null-share probe and CONTRADICTED with the measured share in evidence.
+    The seeded email lie (~5 percent nulls) is the tracer."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.dim_customers,PROD)",
+        field_path="email",
+        claim_type=ClaimType.COMPLETENESS,
+        text="Never null.",
+        predicate={"nullable": False},
+    )
+    spec = plan_probe(claim)
+    assert "email" in spec.sql
+    result = run_probe(spec, warehouse)
+    assert result.error is None
+    finding = adjudicate(claim, result)
+    assert finding.verdict is Verdict.CONTRADICTED
+    assert finding.evidence["null_share"] > 0.01
+    assert "probe_sql" in finding.evidence
+    assert finding.rationale
+
+
+def test_trace_null_share_is_unverifiable_not_confirmed(tmp_path):
+    """Completeness slice 2: the ONE behavior this locks - a null share
+    below the contradiction floor but above zero falls to UNVERIFIABLE,
+    never to CONFIRMED (fail-closed middle band) and never to a false
+    catch."""
+    db = tmp_path / "t.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table t (v integer)")
+    con.execute(
+        "insert into t select case when range = 0 then NULL else range end "
+        "from range(1000)"
+    )
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="v",
+            claim_type=ClaimType.COMPLETENESS,
+            text="Never null.",
+            predicate={"nullable": False},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE  # 0.001 share: neither verdict
+
+
+def test_truthful_never_null_column_is_confirmed(warehouse):
+    """Completeness slice 2b: a genuinely never-null column (customer_id)
+    earns CONFIRMED with a zero measured share over a real sample."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.dim_customers,PROD)",
+        field_path="customer_id",
+        claim_type=ClaimType.COMPLETENESS,
+        text="Primary key.",
+        predicate={"nullable": False},
+    )
+    finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
+    assert finding.verdict is Verdict.CONFIRMED
+    assert finding.evidence["null_share"] == 0.0
+
+
+def test_stale_daily_rollup_lie_is_contradicted(warehouse):
+    """Rubrics slice 3 (freshness): the ONE behavior this locks - a
+    table-level 'updated daily' claim is probed by discovering the table's
+    date columns, measuring the latest value against an explicit as_of
+    anchor, and CONTRADICTED when the staleness dwarfs the cadence. The
+    seeded fct_sessions_daily lie (~51 days stale) is the tracer."""
+    from notary.demo.seeder import ANCHOR_DATE
+
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_sessions_daily,PROD)",
+        field_path=None,
+        claim_type=ClaimType.FRESHNESS,
+        text="Updated daily.",
+        predicate={"cadence": "daily"},
+    )
+    spec = plan_probe(claim, as_of=ANCHOR_DATE)
+    assert spec.sql  # a real probe recipe, not the empty no-recipe marker
+    result = run_probe(spec, warehouse)
+    assert result.error is None
+    assert result.measurements["days_stale"] >= 45
+    finding = adjudicate(claim, result)
+    assert finding.verdict is Verdict.CONTRADICTED
+    assert finding.evidence["days_stale"] >= 45
+    assert finding.evidence["as_of"] == ANCHOR_DATE
+    assert finding.rationale
+
+
+def test_freshness_without_anchor_is_unverifiable(warehouse):
+    """Freshness fail-closed: with no as_of anchor supplied, the probe has
+    no reference date; the claim falls to UNVERIFIABLE instead of silently
+    using the wall clock."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_sessions_daily,PROD)",
+        field_path=None,
+        claim_type=ClaimType.FRESHNESS,
+        text="Updated daily.",
+        predicate={"cadence": "daily"},
+    )
+    finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_hidden_enum_value_lie_is_contradicted(warehouse):
+    """Rubrics slice 4 (domain_enum values): the ONE behavior this locks - a
+    claimed closed enum is contradicted by an observed value outside the
+    claimed set, with the extras named in evidence. The seeded segment lie
+    (hidden 'partner' value) is the tracer."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.dim_customers,PROD)",
+        field_path="segment",
+        claim_type=ClaimType.DOMAIN_ENUM,
+        text="Customer segment, one of {consumer, business}.",
+        predicate={"values": ["consumer", "business"]},
+    )
+    result = run_probe(plan_probe(claim), warehouse)
+    assert result.error is None
+    finding = adjudicate(claim, result)
+    assert finding.verdict is Verdict.CONTRADICTED
+    assert "partner" in finding.evidence["unexpected_values"]
+    assert finding.rationale
+
+
+def test_negative_bounds_lie_is_contradicted(warehouse):
+    """Rubrics slice 4b (domain_enum bounds): a claimed non-negative column
+    with observed negative values is contradicted, measured min in
+    evidence. The seeded qty lie (oversell negatives) is the tracer."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.stg_inventory,PROD)",
+        field_path="qty",
+        claim_type=ClaimType.DOMAIN_ENUM,
+        text="Units on hand. Non-negative.",
+        predicate={"min": 0},
+    )
+    result = run_probe(plan_probe(claim), warehouse)
+    assert result.error is None
+    finding = adjudicate(claim, result)
+    assert finding.verdict is Verdict.CONTRADICTED
+    assert finding.evidence["observed_min"] < 0
+    assert finding.rationale
+
+
+def test_truthful_enum_control_is_confirmed(warehouse):
+    """Rubrics slice 4c: the truthful currency enum control is CONFIRMED
+    only because the complete distinct set was observed within the scan cap
+    and sits inside the claimed set."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)",
+        field_path="currency",
+        claim_type=ClaimType.DOMAIN_ENUM,
+        text="ISO-4217 currency code, one of {USD, EUR, GBP}.",
+        predicate={"values": ["USD", "EUR", "GBP"]},
+    )
+    finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
+    assert finding.verdict is Verdict.CONFIRMED
+
+
+def test_empty_claimed_enum_is_unverifiable_not_contradicted(warehouse):
+    """Domain_enum fail-closed guard: an empty claimed value set is a
+    degenerate claim; treating every observed value as unexpected would
+    manufacture false positives. It falls to UNVERIFIABLE."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)",
+        field_path="currency",
+        claim_type=ClaimType.DOMAIN_ENUM,
+        text="ISO-4217 currency code.",
+        predicate={"values": []},
+    )
+    finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
+    assert finding.verdict is Verdict.UNVERIFIABLE

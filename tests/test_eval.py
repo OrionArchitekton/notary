@@ -46,7 +46,9 @@ _PREDICATES = {
     ("fct_orders", "shipped_at"): {"nullable": False},
     ("fct_refunds", "reason"): {"nullable": False},
     ("fct_payments", "currency"): {"values": ["USD", "EUR", "GBP"]},
-    ("dim_customers", "country_code"): {"values": []},
+    # the description names a standard, not a value set: a faithful
+    # extraction emits no claim at all
+    ("dim_customers", "country_code"): None,
     ("dim_customers", "segment"): {"values": ["consumer", "business"]},
     ("fct_orders", "status"): {
         "values": ["placed", "shipped", "delivered", "returned"]
@@ -70,17 +72,22 @@ class _ManifestLLM:
         m = re.search(r"Target: column `(\w+)`", user)
         col = m.group(1) if m else None
         entry = _BY_KEY[(table, col)]  # KeyError = unknown prompt
+        predicate = _PREDICATES[(table, col)]
+        if predicate is None:
+            return "[]"  # no testable claim in this description
         return json.dumps([
             {
                 "claim_type": entry.claim_type.value,
                 "text": entry.description,
-                "predicate": _PREDICATES[(table, col)],
+                "predicate": predicate,
             }
         ])
 
 
 def test_eval_scores_manifest_against_ground_truth(warehouse):
-    report = evaluate(MANIFEST, warehouse, _ManifestLLM())
+    from notary.demo.seeder import ANCHOR_DATE
+
+    report = evaluate(MANIFEST, warehouse, _ManifestLLM(), as_of=ANCHOR_DATE)
 
     # every manifest entry is scored exactly once
     assert len(report.entries) == len(MANIFEST.claims)
@@ -93,16 +100,22 @@ def test_eval_scores_manifest_against_ground_truth(warehouse):
 
     rows = report.rows()
     assert set(rows) == set(ClaimType)  # every claim type gets a row
-    # v1 rubric reality, published honestly: the cents lie is caught, the
-    # three non-USD unit lies are reported as MISSED, no control trips
+    # rubric reality, published honestly: USD unit rubric catches the cents
+    # lie and reports the three non-USD unit lies as MISSED; completeness,
+    # freshness, and domain_enum rubrics catch their planted lies; the
+    # deprecation lie stays an honest miss (needs query history)
     us = rows[ClaimType.UNIT_SCALE]
     assert us["caught"] == 1
     assert us["missed"] == 3
     assert us["false_positives"] == 0
-    # rubric-less claim types report their misses instead of hiding them
-    assert rows[ClaimType.FRESHNESS]["missed"] == 2
-    assert rows[ClaimType.COMPLETENESS]["missed"] == 3
+    assert rows[ClaimType.COMPLETENESS]["caught"] == 3
+    assert rows[ClaimType.FRESHNESS]["caught"] == 2
+    de = rows[ClaimType.DOMAIN_ENUM]
+    assert de["caught"] == 2
+    assert de["false_positives"] == 0
     assert rows[ClaimType.DEPRECATION_USAGE]["missed"] == 1
+    assert totals["caught"] == 8
+    assert totals["missed"] == 4
 
     # per-entry outcomes for the known S1 pair
     by_key = {(r.entry.table, r.entry.column): r for r in report.entries}
@@ -115,7 +128,7 @@ def test_eval_scores_manifest_against_ground_truth(warehouse):
     assert "missed" in md.lower()
 
     # S7 acceptance: reproducible - a second run yields the identical table
-    again = evaluate(MANIFEST, warehouse, _ManifestLLM())
+    again = evaluate(MANIFEST, warehouse, _ManifestLLM(), as_of=ANCHOR_DATE)
     assert again.to_markdown() == md
 
 
@@ -151,8 +164,9 @@ def test_extraction_failure_is_isolated_and_reported(warehouse):
     assert totals["controls"] == 4  # scored controls only
     assert "unscored" in report.to_markdown().lower()
 
-    # neighbours in the same table are unaffected
-    assert by_key[("dim_customers", "email")].outcome == "missed"
+    # neighbours in the same table are unaffected (email's completeness lie
+    # is caught by the null-share rubric)
+    assert by_key[("dim_customers", "email")].outcome == "caught"
     assert not by_key[("dim_customers", "email")].extraction_error
     assert by_key[("fct_payments", "amount")].outcome == "caught"
 
@@ -351,12 +365,18 @@ def test_readme_table_is_the_verbatim_replay_output(tmp_path):
     """S7 slice 4: the ONE behavior this locks - the table published in the
     README is byte-for-byte what the replay run emits. A hand-edited or stale
     README number fails this test; the published table stays evidence."""
+    from notary.demo.seeder import ANCHOR_DATE
+
     root = Path(__file__).parent.parent
     db = tmp_path / "wh.duckdb"
     build_warehouse(db, seed=DEFAULT_SEED)
     con = duckdb.connect(str(db), read_only=True)
     try:
-        report = evaluate(MANIFEST, con, ReplayLLM(root / "tests/fixtures/llm"))
+        # same invocation the CLI uses, anchor included
+        report = evaluate(
+            MANIFEST, con, ReplayLLM(root / "tests/fixtures/llm"),
+            as_of=ANCHOR_DATE,
+        )
     finally:
         con.close()
     readme = (root / "README.md").read_text()
