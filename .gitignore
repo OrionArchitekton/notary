@@ -8,3 +8,4 @@ node_modules/
 .datahub/
 *.egg-info/
 .pytest_cache/
+.venv
