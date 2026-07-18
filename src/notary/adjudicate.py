@@ -285,6 +285,7 @@ def _adjudicate_domain_enum(claim: Claim, result: ProbeResult) -> Finding:
             "observed_min": float(observed_min),
             "observed_max": float(observed_max),
             "row_count": int(m["row_count"]),
+            "prefix_rows": m.get("prefix_rows"),
             "scan_limit": m.get("scan_limit"),
             "probe_sql": result.spec.sql,
             "rubric": (
@@ -301,7 +302,8 @@ def _adjudicate_domain_enum(claim: Claim, result: ProbeResult) -> Finding:
                 rationale="; ".join(violations),
             )
         scan_limit = int(m.get("scan_limit") or 0)
-        if not (scan_limit > 0 and int(m["row_count"]) < scan_limit):
+        prefix_rows = int(m.get("prefix_rows") or 0)
+        if not (scan_limit > 0 and prefix_rows < scan_limit):
             # a capped prefix cannot prove a universal bound claim
             return Finding(
                 claim=claim,

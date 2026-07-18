@@ -430,3 +430,28 @@ def test_hourly_cadence_never_confirms_at_date_precision(tmp_path):
     finally:
         ro.close()
     assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_probe_scans_bound_rows_before_null_filter():
+    """Cycle-3 regression (Codex HIGH): LIMIT must bound the rows READ, so
+    the null filter sits OUTSIDE the bounded subquery; filtering first would
+    scan a sparse table until it finds SCAN_LIMIT non-null values."""
+    unit = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)",
+        field_path="amount", claim_type=ClaimType.UNIT_SCALE,
+        text="Transaction amount in USD.", predicate={"unit": "USD"},
+    )
+    enum = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)",
+        field_path="currency", claim_type=ClaimType.DOMAIN_ENUM,
+        text="One of {USD}.", predicate={"values": ["USD"]},
+    )
+    bound = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.stg_inventory,PROD)",
+        field_path="qty", claim_type=ClaimType.DOMAIN_ENUM,
+        text="Non-negative.", predicate={"min": 0},
+    )
+    for claim in (unit, enum, bound):
+        sql = plan_probe(claim).sql.lower()
+        assert "is not null" in sql
+        assert sql.index("limit") < sql.index("is not null"), sql

@@ -39,13 +39,16 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
         col = claim.field_path
         if not _IDENT.match(col):
             raise ValueError(f"unsafe column identifier: {col!r}")
+        # LIMIT bounds the rows READ, so the null filter sits OUTSIDE the
+        # bounded subquery (cycle-3 finding: filtering first scans a sparse
+        # table until it finds SCAN_LIMIT non-null values)
         sql = (
             f'select median(v) as median, '
             f'avg(case when v = floor(v) then 1.0 else 0.0 end) as integer_share, '
             f'min(v) as min, max(v) as max, count(*) as row_count, '
             f'{SCAN_LIMIT} as scan_limit '
-            f'from (select "{col}" as v from "{table}" '
-            f'where "{col}" is not null limit {SCAN_LIMIT})'
+            f'from (select "{col}" as v from "{table}" limit {SCAN_LIMIT}) '
+            f'where v is not null'
         )
         return ProbeSpec(
             claim=claim,
@@ -82,8 +85,8 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
             # not fully observed
             sql = (
                 f'select distinct v from '
-                f'(select "{col}" as v from "{table}" '
-                f'where "{col}" is not null limit {SCAN_LIMIT}) '
+                f'(select "{col}" as v from "{table}" limit {SCAN_LIMIT}) '
+                f'where v is not null '
                 f'limit {DISTINCT_CAP + 1}'
             )
             return ProbeSpec(
@@ -98,17 +101,20 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
             isinstance(claim.predicate.get(k), (int, float)) for k in ("min", "max")
         ):
             sql = (
-                f'select min("{col}") as observed_min, '
-                f'max("{col}") as observed_max, count(*) as row_count, '
+                f'select min(v) as observed_min, '
+                f'max(v) as observed_max, count(v) as row_count, '
+                f'(select count(*) from (select 1 from "{table}" '
+                f'limit {SCAN_LIMIT})) as prefix_rows, '
                 f'{SCAN_LIMIT} as scan_limit '
-                f'from (select "{col}" from "{table}" '
-                f'where "{col}" is not null limit {SCAN_LIMIT})'
+                f'from (select "{col}" as v from "{table}" limit {SCAN_LIMIT}) '
+                f'where v is not null'
             )
             return ProbeSpec(
                 claim=claim,
                 sql=sql,
                 measure_keys=(
-                    "observed_min", "observed_max", "row_count", "scan_limit"
+                    "observed_min", "observed_max", "row_count",
+                    "prefix_rows", "scan_limit",
                 ),
             )
     if (
@@ -148,12 +154,11 @@ def run_probe(spec: ProbeSpec, con: duckdb.DuckDBPyConnection) -> ProbeResult:
         return _run_freshness_probe(spec, con)
     if "observed_values" in spec.measure_keys:
         table = _urn_table(spec.claim.asset_urn)
-        col = spec.claim.field_path
         try:
             rows = con.execute(spec.sql).fetchall()
             rows_scanned = con.execute(
                 f'select count(*) from (select 1 from "{table}" '
-                f'where "{col}" is not null limit {SCAN_LIMIT})'
+                f'limit {SCAN_LIMIT})'
             ).fetchone()[0]
         except duckdb.Error as e:
             return ProbeResult(spec=spec, measurements={}, error=str(e))
