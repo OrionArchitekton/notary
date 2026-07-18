@@ -200,6 +200,10 @@ def extract_claims(
             SYSTEM_PROMPT, _user_prompt(asset_urn, field_path, description)
         )
         for item in _parse_completion(raw):
+            if not isinstance(item, dict):
+                raise ExtractionParseError(
+                    f"completion array element is not an object: {item!r}"
+                )
             try:
                 claim_type = ClaimType(item["claim_type"])
             except (KeyError, ValueError) as e:

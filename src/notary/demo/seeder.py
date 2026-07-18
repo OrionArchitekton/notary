@@ -8,6 +8,7 @@ seeded RNG so the same seed yields a byte-identical warehouse.
 from __future__ import annotations
 
 import json
+import os
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -136,9 +137,12 @@ def build_warehouse(db_path: str | Path, seed: int = DEFAULT_SEED) -> Manifest:
     """Create the fiction-retail DuckDB warehouse. Deterministic per seed."""
     rng = random.Random(seed)
     db_path = Path(db_path)
-    if db_path.exists():
-        db_path.unlink()
-    con = duckdb.connect(str(db_path))
+    # build into a sibling temp file and swap in atomically, so a failed
+    # build never destroys an existing warehouse (review finding)
+    tmp_path = db_path.with_name(db_path.name + ".building")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    con = duckdb.connect(str(tmp_path))
     try:
         # single transaction + bulk VALUES inserts; see _bulk_insert
         con.execute("begin transaction")
@@ -151,8 +155,12 @@ def build_warehouse(db_path: str | Path, seed: int = DEFAULT_SEED) -> Manifest:
         _seed_legacy_orders(con, rng)
         _seed_inventory(con, rng)
         con.execute("commit")
-    finally:
+    except BaseException:
         con.close()
+        tmp_path.unlink(missing_ok=True)
+        raise
+    con.close()
+    os.replace(tmp_path, db_path)
     return MANIFEST
 
 

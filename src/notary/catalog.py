@@ -163,7 +163,11 @@ def read_descriptions(gms_url: str, asset_urn: str) -> dict[str | None, str]:
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read())
-    ds = (data.get("data") or {}).get("dataset") or {}
+    if data.get("errors"):
+        raise RuntimeError(f"catalog read failed: {data['errors']}")
+    ds = (data.get("data") or {}).get("dataset")
+    if ds is None:
+        raise RuntimeError(f"catalog read failed: no dataset for {asset_urn}")
     out: dict[str | None, str] = {}
     table_desc = ((ds.get("editableProperties") or {}).get("description")
                   or (ds.get("properties") or {}).get("description"))
@@ -231,8 +235,12 @@ class NotaryWriter:
                     },
                 )
                 doc_urn = _extract_doc_urn(res)
+                # ok requires the URN, not just a non-error envelope (review
+                # finding: a nominally successful write with no locatable
+                # dossier must block the description rewrite)
                 receipt["documents"].append(
-                    {"title": title, "urn": doc_urn, "ok": not res.isError}
+                    {"title": title, "urn": doc_urn,
+                     "ok": (not res.isError) and doc_urn is not None}
                 )
                 if doc_urn:
                     doc_urns.append(doc_urn)
