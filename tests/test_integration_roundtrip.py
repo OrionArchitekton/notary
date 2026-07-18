@@ -143,3 +143,67 @@ def test_s1_round_trip_writes_verdict_back(ingested, monkeypatch):
         f["description"] for f in fields if f["fieldPath"] == "amount"
     )
     assert "Notary" in desc_text and "cents" in desc_text
+
+
+def test_incident_raise_and_resolve_round_trip(tmp_path):
+    """S4 tracer: a CONTRADICTED verdict raises a REAL incident on the live
+    quickstart via OSS GraphQL, and the incident is resolvable (the
+    reversibility half). Returns a real urn:li:incident:* or fails."""
+    from notary.incidents import draft_incident, raise_incident, resolve_incident
+
+    db = tmp_path / "wh.duckdb"
+    build_warehouse(db, seed=DEFAULT_SEED)
+    con = duckdb.connect(str(db), read_only=True)
+    try:
+        claims = extract_claims(
+            PAYMENTS_URN,
+            {"amount": "Transaction amount in USD."},
+            ReplayLLM("tests/fixtures/llm"),
+        )
+        findings = [
+            adjudicate(c, run_probe(plan_probe(c), con)) for c in claims
+        ]
+    finally:
+        con.close()
+    assert any(f.verdict is Verdict.CONTRADICTED for f in findings)
+
+    draft = draft_incident(PAYMENTS_URN, findings, run_date="2026-07-18")
+    assert draft is not None
+    incident_urn = raise_incident(GMS, draft)
+    assert incident_urn.startswith("urn:li:incident:")
+    # reversibility: resolve it (also verifies updateIncidentStatus works)
+    resolve_incident(GMS, incident_urn, note="Notary test cleanup")
+
+
+def test_run_cli_single_asset_end_to_end(tmp_path):
+    """The operator command: ONE invocation reads the LIVE catalog, extracts,
+    probes, adjudicates, writes the verdicts back, and raises an incident for
+    the contradicted asset. This is S1-S5 through the real front door."""
+    import os
+    import re
+    import subprocess
+    import sys
+
+    from notary.incidents import resolve_incident
+
+    # reset the planted lie in case a prior run corrected it
+    _reset_editable_description(
+        PAYMENTS_URN, "amount", "Transaction amount in USD."
+    )
+    env = {**os.environ, "NOTARY_RUN_DATE": "2026-07-18"}
+    r = subprocess.run(
+        [
+            sys.executable, "-m", "notary.run",
+            "--gms", GMS,
+            "--db", str(tmp_path / "wh.duckdb"),
+            "--fixtures", "tests/fixtures/llm",
+            "--asset", PAYMENTS_URN,
+        ],
+        capture_output=True, text=True, timeout=300, env=env,
+        cwd=str(__import__("pathlib").Path(__file__).parent.parent),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "CONTRADICTED" in r.stdout
+    m = re.search(r"urn:li:incident:\S+", r.stdout)
+    assert m, r.stdout
+    resolve_incident(GMS, m.group(0), note="Notary test cleanup")
