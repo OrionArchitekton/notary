@@ -353,3 +353,23 @@ def test_fabricated_deprecated_predicate_is_dropped():
         llm=_CannedLLM(canned),
     )
     assert claims == []
+
+
+def test_equivalent_deprecation_wording_is_entailed():
+    """PR5 cycle-1 (P2 thread): retired/superseded/sunset wording states a
+    deprecation as well as the literal word."""
+    for text in (
+        "Retired 2024, superseded by fct_orders.",
+        "Sunset table. Do not use.",
+        "Obsolete since Q1.",
+    ):
+        canned = json.dumps([{
+            "claim_type": "deprecation_usage", "text": text,
+            "predicate": {"deprecated": True},
+        }])
+        claims = extract_claims(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            descriptions={None: text},
+            llm=_CannedLLM(canned),
+        )
+        assert len(claims) == 1, text

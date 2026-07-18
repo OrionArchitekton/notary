@@ -128,22 +128,31 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
         and claim.predicate.get("deprecated") is True
         and as_of is not None
     ):
-        # recent usage window anchored to as_of (never the wall clock);
-        # a warehouse without a query_log errors into UNVERIFIABLE
+        # recent usage window anchored to as_of (never the wall clock),
+        # bounded BELOW and ABOVE (post-anchor queries are not "the 30 days
+        # before"); LIMIT bounds the log rows READ, with the filters outside
+        # the bounded subquery; a warehouse without a query_log errors into
+        # UNVERIFIABLE
         date.fromisoformat(as_of)  # defensive: literal goes into SQL
         sql = (
             f"select count(*) as recent_queries, "
             f"count(distinct query_user) as distinct_users, "
+            f"(select count(*) from (select 1 from query_log "
+            f"limit {SCAN_LIMIT})) as log_rows_scanned, "
             f"{SCAN_LIMIT} as scan_limit "
-            f"from (select query_user from query_log "
+            f"from (select table_name, queried_at, query_user "
+            f"from query_log limit {SCAN_LIMIT}) "
             f"where table_name = '{table}' "
             f"and queried_at >= (date '{as_of}' - interval 29 day) "
-            f"limit {SCAN_LIMIT})"
+            f"and queried_at < (date '{as_of}' + interval 1 day)"
         )
         return ProbeSpec(
             claim=claim,
             sql=sql,
-            measure_keys=("recent_queries", "distinct_users", "scan_limit"),
+            measure_keys=(
+                "recent_queries", "distinct_users",
+                "log_rows_scanned", "scan_limit",
+            ),
             as_of=as_of,
         )
     if (

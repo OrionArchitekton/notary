@@ -56,16 +56,17 @@ def adjudicate(claim: Claim, result: ProbeResult) -> Finding:
     return _unverifiable_no_rubric(claim, result)
 
 
-# Percent (0-100 scale) rubric: the stored-as-fraction signature is values
-# CONFINED to [0, 1] where EVERY value times 100 lands on an integer (round
-# percentages divided by 100), with at least two distinct magnitudes.
-# Genuinely tiny continuous percentages fail centi-integrality and fall to
-# UNVERIFIABLE. Known documented limitation: a column of round SUB-1-percent
-# values stored as true percents matches the signature.
+# Percent (0-100 scale) rubric. PR5 review adjudication: stored-as-fraction
+# vs rounded sub-1-percent TRUE percentages is scale-invariant (any 0-1
+# distribution has a legitimate tiny-percent reading), so a
+# distribution-only rubric must NEVER contradict; a [0, 1]-confined
+# distribution falls to UNVERIFIABLE with the ambiguity stated. Only
+# confirmation is reachable, from values that actually use the percent
+# scale.
 _PERCENT_RUBRIC_TEXT = (
-    "CONTRADICTED iff 0 <= min and max <= 1 and centi_integer_share == 1.0 "
-    "and max > min; CONFIRMED iff 0 <= min, median > 1, and max <= 100; "
-    "otherwise UNVERIFIABLE"
+    "CONFIRMED iff 0 <= min, median > 1, and max <= 100; a [0, 1]-confined "
+    "distribution is scale-ambiguous (fraction vs sub-1-percent values) and "
+    "falls to UNVERIFIABLE; contradiction is unreachable by design"
 )
 
 
@@ -95,16 +96,16 @@ def _adjudicate_percent(claim: Claim, result: ProbeResult) -> Finding:
         "probe_sql": result.spec.sql,
         "rubric": _PERCENT_RUBRIC_TEXT,
     }
-    if 0.0 <= lo and hi <= 1.0 and centi_share == 1.0 and hi > lo:
+    if 0.0 <= lo and hi <= 1.0:
         return Finding(
             claim=claim,
-            verdict=Verdict.CONTRADICTED,
+            verdict=Verdict.UNVERIFIABLE,
             evidence=evidence,
             rationale=(
-                f"described as a 0-to-100 percent but every value in "
-                f"[{lo:.3f}, {hi:.3f}] is a round percentage divided by "
-                f"100; consistent with a stored 0-to-1 fraction, not a "
-                f"percentage"
+                f"values confined to [{lo:.3f}, {hi:.3f}] are "
+                f"scale-ambiguous: a stored 0-to-1 fraction and legitimate "
+                f"sub-1-percent values are indistinguishable by "
+                f"distribution alone; refusing to guess"
             ),
         )
     if 0.0 <= lo and median > 1.0 and hi <= 100.0:
@@ -409,9 +410,11 @@ def _adjudicate_domain_enum(claim: Claim, result: ProbeResult) -> Finding:
 _RECENT_QUERY_CONTRADICTION_FLOOR = 10
 
 _DEPRECATION_RUBRIC_TEXT = (
-    f"over the 30 days before as_of: CONTRADICTED iff recent_queries >= "
+    f"over the 30 days up to and including as_of (later activity excluded): "
+    f"CONTRADICTED iff recent_queries >= "
     f"{_RECENT_QUERY_CONTRADICTION_FLOOR}; CONFIRMED iff recent_queries == "
-    f"0; otherwise UNVERIFIABLE"
+    f"0 over a complete log scan (under the scan limit); otherwise "
+    f"UNVERIFIABLE"
 )
 
 
@@ -427,6 +430,7 @@ def _adjudicate_deprecation(claim: Claim, result: ProbeResult) -> Finding:
         "recent_queries": recent,
         "distinct_users": int(m.get("distinct_users") or 0),
         "as_of": result.spec.as_of,
+        "log_rows_scanned": int(m.get("log_rows_scanned") or 0),
         "scan_limit": scan_limit,
         "probe_sql": result.spec.sql,
         "rubric": _DEPRECATION_RUBRIC_TEXT,
@@ -442,14 +446,27 @@ def _adjudicate_deprecation(claim: Claim, result: ProbeResult) -> Finding:
                 f"the 30 days before {result.spec.as_of}"
             ),
         )
-    if recent == 0:
+    log_rows_scanned = int(m.get("log_rows_scanned") or 0)
+    if recent == 0 and scan_limit > 0 and log_rows_scanned < scan_limit:
         return Finding(
             claim=claim,
             verdict=Verdict.CONFIRMED,
             evidence=evidence,
             rationale=(
-                f"no queries in the 30 days before {result.spec.as_of}; "
-                f"consistent with the deprecation claim"
+                f"no queries in the 30 days before {result.spec.as_of} "
+                f"over the complete log; consistent with the deprecation "
+                f"claim"
+            ),
+        )
+    if recent == 0:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"no matches in a log scan capped at {scan_limit} rows; a "
+                f"silent prefix cannot confirm the deprecation claim; "
+                f"refusing to guess"
             ),
         )
     return Finding(

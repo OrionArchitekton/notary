@@ -457,11 +457,12 @@ def test_probe_scans_bound_rows_before_null_filter():
         assert sql.index("limit") < sql.index("is not null"), sql
 
 
-def test_percent_stored_as_fraction_lie_is_contradicted(warehouse):
-    """Unit-rubrics slice 1 (percent): the ONE behavior this locks - a
-    claimed 0-to-100 percent column whose observed values occupy at most 1
-    percent of that range (all within [0, 1], fractional) is CONTRADICTED
-    as stored-as-fraction. The seeded discount_pct lie is the tracer."""
+def test_fraction_scale_ambiguity_is_unverifiable_not_contradicted(warehouse):
+    """PR5 cycle-1 adjudication (Codex HIGH x2): stored-as-fraction vs
+    rounded sub-1-percent TRUE percentages is scale-invariant; any 0-1
+    distribution has a legitimate tiny-percent reading, so a
+    distribution-only rubric must NOT contradict. The seeded discount lie
+    stays a DECLARED miss (fail-closed beats a false positive)."""
     claim = Claim(
         asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_orders,PROD)",
         field_path="discount_pct",
@@ -472,9 +473,8 @@ def test_percent_stored_as_fraction_lie_is_contradicted(warehouse):
     result = run_probe(plan_probe(claim), warehouse)
     assert result.error is None
     finding = adjudicate(claim, result)
-    assert finding.verdict is Verdict.CONTRADICTED
-    assert finding.evidence["max"] <= 1.0
-    assert finding.rationale
+    assert finding.verdict is Verdict.UNVERIFIABLE
+    assert "scale" in finding.rationale.lower() or "fraction" in finding.rationale.lower()
 
 
 def test_genuine_percent_distribution_is_confirmed(tmp_path):
@@ -603,3 +603,52 @@ def test_deprecation_without_query_log_is_unverifiable(tmp_path):
     finally:
         ro.close()
     assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_deprecation_window_excludes_post_anchor_queries(tmp_path):
+    """PR5 cycle-1 regression (HIGH x2): queries dated AFTER as_of must not
+    count toward 'the 30 days before' it; a historical anchored run must
+    not be contradicted by later activity."""
+    db = tmp_path / "later.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table old_stuff (x integer)")
+    con.execute(
+        "create table query_log (table_name varchar, queried_at timestamp, "
+        "query_user varchar)"
+    )
+    con.execute(
+        "insert into query_log select 'old_stuff', "
+        "timestamp '2026-07-25 10:00:00' + interval (range) hour, 'ana' "
+        "from range(20)"
+    )
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.old_stuff,PROD)",
+            field_path=None,
+            claim_type=ClaimType.DEPRECATION_USAGE,
+            text="DEPRECATED. No longer used.",
+            predicate={"deprecated": True},
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, as_of="2026-07-18"), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.CONFIRMED  # window before as_of is silent
+
+
+def test_deprecation_probe_bounds_the_log_scan():
+    """PR5 cycle-1 regression: the LIMIT bounds rows READ from query_log
+    (inner subquery), not matching output rows."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.legacy_orders_v1,PROD)",
+        field_path=None,
+        claim_type=ClaimType.DEPRECATION_USAGE,
+        text="DEPRECATED. No longer used.",
+        predicate={"deprecated": True},
+    )
+    sql = plan_probe(claim, as_of="2026-07-18").sql.lower()
+    # the table_name/date filters sit OUTSIDE the bounded subquery
+    assert ") where table_name" in sql, sql

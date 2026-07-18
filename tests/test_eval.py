@@ -100,13 +100,14 @@ def test_eval_scores_manifest_against_ground_truth(warehouse):
 
     rows = report.rows()
     assert set(rows) == set(ClaimType)  # every claim type gets a row
-    # rubric reality, published honestly: the cents and percent unit lies
-    # are caught, the ms and grams unit lies stay honest misses (no
-    # defensible magnitude signature); completeness, freshness, domain_enum,
-    # and deprecation rubrics catch their planted lies
+    # rubric reality, published honestly: the cents lie is caught; the
+    # percent, ms, and grams unit lies are DECLARED misses (fraction vs
+    # sub-1-percent is scale-invariant, magnitude bands would be guesses);
+    # completeness, freshness, domain_enum, and deprecation rubrics catch
+    # their planted lies
     us = rows[ClaimType.UNIT_SCALE]
-    assert us["caught"] == 2
-    assert us["missed"] == 2
+    assert us["caught"] == 1
+    assert us["missed"] == 3
     assert us["false_positives"] == 0
     assert rows[ClaimType.COMPLETENESS]["caught"] == 3
     assert rows[ClaimType.FRESHNESS]["caught"] == 2
@@ -114,8 +115,8 @@ def test_eval_scores_manifest_against_ground_truth(warehouse):
     assert de["caught"] == 2
     assert de["false_positives"] == 0
     assert rows[ClaimType.DEPRECATION_USAGE]["caught"] == 1
-    assert totals["caught"] == 10
-    assert totals["missed"] == 2
+    assert totals["caught"] == 9
+    assert totals["missed"] == 3
 
     # per-entry outcomes for the known S1 pair
     by_key = {(r.entry.table, r.entry.column): r for r in report.entries}
