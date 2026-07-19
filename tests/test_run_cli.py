@@ -173,3 +173,246 @@ def test_schema_fingerprint_match_is_pure_and_strict():
     )
     # no cataloged fields = nothing to bind on: fail closed
     assert not schema_matches(catalog_fields=[], warehouse_columns=["a"])
+
+
+def test_lineage_gate_refuses_without_upstream_edge(monkeypatch):
+    """Judge-slice v3: a declared reconciliation source corroborates only
+    when the catalog records it as a lineage UPSTREAM of the suspect;
+    absence and query failure both refuse (fail-closed)."""
+    import io
+    import json
+    import urllib.request
+
+    from notary.run import lineage_verified_upstream
+
+    urn = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+           "fiction_retail.fct_payments,PROD)")
+    billing = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+               "fiction_retail.billing_invoices,PROD)")
+
+    def _resp(payload):
+        class _R(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return _R(json.dumps(payload).encode())
+
+    # edge present -> verified
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
+            "relationships": [{"entity": {"urn": billing}}]}}}}),
+    )
+    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
+    assert ok and "lineage-verified" in detail
+
+    # edge absent -> refused
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
+            "relationships": []}}}}),
+    )
+    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
+    assert not ok and "refused" in detail
+
+    # query failure -> refused, never assumed
+    def _boom(req, timeout=15):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
+    assert not ok and "refused" in detail
+
+
+def test_lineage_gate_rejects_self_reference_and_qualified_names(monkeypatch):
+    """PR #11 findings: a reference resolving to the suspect itself is
+    refused even when a self-edge exists in the catalog, a qualified
+    reference name is used as-is, and an unqualified suspect name gets no
+    invented prefix."""
+    import io
+    import json
+    import urllib.request
+
+    from notary.run import lineage_verified_upstream
+
+    urn = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+           "fiction_retail.fct_payments,PROD)")
+
+    def _resp(payload):
+        class _R(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return _R(json.dumps(payload).encode())
+
+    # self-edge in the catalog: still refused, no query needed to accept
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
+            "total": 1, "relationships": [{"entity": {"urn": urn}}]}}}}),
+    )
+    ok, detail = lineage_verified_upstream("http://gms", urn, "fct_payments")
+    assert not ok and "suspect asset itself" in detail
+
+    # a fully qualified reference name is taken verbatim
+    qualified = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+                 "other_db.billing,PROD)")
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
+            "total": 1,
+            "relationships": [{"entity": {"urn": qualified}}]}}}}),
+    )
+    ok, detail = lineage_verified_upstream("http://gms", urn, "other_db.billing")
+    assert ok, detail
+
+    # an unqualified suspect name gets no invented prefix
+    bare_urn = "urn:li:dataset:(urn:li:dataPlatform:duckdb,payments,PROD)"
+    bare_ref = "urn:li:dataset:(urn:li:dataPlatform:duckdb,billing,PROD)"
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
+            "total": 1,
+            "relationships": [{"entity": {"urn": bare_ref}}]}}}}),
+    )
+    ok, detail = lineage_verified_upstream("http://gms", bare_urn, "billing")
+    assert ok, detail
+
+
+def test_lineage_gate_pages_past_the_first_hundred(monkeypatch):
+    """PR #11 finding: a valid source on a later lineage page must be
+    found, not reported absent."""
+    import io
+    import json
+    import urllib.request
+
+    from notary.run import lineage_verified_upstream
+
+    urn = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+           "fiction_retail.fct_payments,PROD)")
+    billing = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+               "fiction_retail.billing_invoices,PROD)")
+
+    def _resp(payload):
+        class _R(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return _R(json.dumps(payload).encode())
+
+    def _paged(req, timeout=15):
+        body = json.loads(req.data)
+        start = body["variables"]["start"]
+        if start == 0:
+            rels = [{"entity": {"urn": f"urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.up{i},PROD)"}} for i in range(100)]
+        else:
+            rels = [{"entity": {"urn": billing}}]
+        return _resp({"data": {"dataset": {"lineage": {
+            "total": 101, "relationships": rels}}}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _paged)
+    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
+    assert ok, detail
+
+
+def test_recon_refusal_blocks_obsolete_incident_resolution():
+    """PR #11 adversarial finding: a run downgraded by a reconciliation
+    refusal must never clear a standing incident; the decision logic in
+    main() gates close_obsolete_incident on zero refusals. Locked here at
+    the source level to keep the contract visible."""
+    import inspect
+
+    from notary import run as run_mod
+
+    src = inspect.getsource(run_mod.main)
+    assert "elif recon_refusals or unresolved_unit_suspicion(findings):" in src
+    idx_refusal = src.index("elif recon_refusals")
+    idx_close = src.index("close_obsolete_incident")
+    assert idx_refusal < idx_close
+
+
+def test_lineage_edges_group_by_downstream():
+    """PR #11 finding: the UpstreamLineage aspect replaces wholesale, so
+    all of a downstream's edges must travel in one emission."""
+    from notary.catalog import _grouped_lineage
+
+    grouped = _grouped_lineage((
+        ("billing", "payments"),
+        ("ledger", "payments"),
+        ("billing", "payments"),
+        ("payments", "reporting"),
+    ))
+    assert grouped == {
+        "payments": ["billing", "ledger"],
+        "reporting": ["payments"],
+    }
+
+
+def test_unresolved_unit_suspicion_blocks_incident_clearing():
+    """PR #11 cycle-2 finding: a cents-signature unit claim this run could
+    not adjudicate (nothing declared, or declared and uncorroborated) is
+    OUTSTANDING suspicion; a run carrying one must never clear a standing
+    incident. A configuration omission is not fresh evidence."""
+    from notary.run import unresolved_unit_suspicion
+    from notary.types import Claim, ClaimType, Finding, Verdict
+
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)",
+        field_path="amount", claim_type=ClaimType.UNIT_SCALE,
+        text="Transaction amount in USD.", predicate={"unit": "USD"},
+    )
+    suspicious = Finding(
+        claim=claim, verdict=Verdict.UNVERIFIABLE,
+        evidence={"integer_share": 1.0, "median": 12795.0},
+        rationale="cents signature, nothing declared",
+    )
+    assert unresolved_unit_suspicion([suspicious])
+
+    confirmed = Finding(
+        claim=claim, verdict=Verdict.CONFIRMED,
+        evidence={"integer_share": 0.01, "median": 127.95},
+        rationale="dollars",
+    )
+    assert not unresolved_unit_suspicion([confirmed])
+
+    # a no-rubric UNVERIFIABLE nests measurements and carries no
+    # top-level cents signature: not suspicion
+    no_rubric = Finding(
+        claim=claim, verdict=Verdict.UNVERIFIABLE,
+        evidence={"measurements": {"integer_share": 1.0, "median": 5000}},
+        rationale="no v1 rubric",
+    )
+    assert not unresolved_unit_suspicion([no_rubric])
+
+
+def test_reconcile_flag_rejects_qualified_identifiers():
+    """PR #11 cycle-2 finding: the probe layer addresses one warehouse
+    schema with bare identifiers; a qualified reference accepted here
+    would crash plan_probe after passing the lineage gate."""
+    import pytest as _pytest
+
+    from notary.run import parse_reconcile_args
+
+    with _pytest.raises(ValueError):
+        parse_reconcile_args(["amount=finance.billing:order_id:order_id:total"])
+    with _pytest.raises(ValueError):
+        parse_reconcile_args(['amount=billing:order id:order_id:total'])
+
+
+def test_lineage_merge_preserves_existing_upstreams():
+    """PR #11 cycle-2 finding: the UpstreamLineage aspect replaces
+    wholesale, so declared edges must merge with what the catalog already
+    records, never silently drop it."""
+    from notary.catalog import _merged_upstreams
+
+    merged = _merged_upstreams(
+        existing=["urn:a", "urn:b"],
+        declared=["urn:b", "urn:c"],
+    )
+    assert merged == ["urn:a", "urn:b", "urn:c"]

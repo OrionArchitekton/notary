@@ -1,0 +1,9 @@
+{
+ "completion": "[{\"claim_type\":\"unit_scale\",\"text\":\"Service fee amount in USD.\",\"predicate\":{\"unit\":\"USD\"}}]",
+ "user": "Asset: urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.stg_service_fees,PROD)\nTarget: column `fee_usd`\nDescription: Service fee amount in USD.",
+ "meta": {
+  "model": "claude-opus-4-8",
+  "captured_at": "2026-07-19",
+  "note": "real completion captured for strict replay in unit tests"
+ }
+}

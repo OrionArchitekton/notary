@@ -1,0 +1,9 @@
+{
+ "completion": "[{\"claim_type\":\"unit_scale\",\"text\":\"Canonical invoice total in major currency units from the billing system.\",\"predicate\":{\"unit\":\"major_currency_units\"}}]",
+ "user": "Asset: urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.billing_invoices,PROD)\nTarget: column `total_major`\nDescription: Canonical invoice total in major currency units from the billing system.",
+ "meta": {
+  "model": "claude-opus-4-8",
+  "captured_at": "2026-07-19",
+  "note": "real completion captured for strict replay in unit tests"
+ }
+}

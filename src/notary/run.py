@@ -76,11 +76,113 @@ def receipt_ok(receipt: dict) -> bool:
     return True
 
 
+def lineage_verified_upstream(
+    gms_url: str, asset_urn: str, reference_table: str
+) -> tuple[bool, str]:
+    """A declared reconciliation source earns trust only when the catalog
+    itself records it as an UPSTREAM of the suspect asset (judge-slice
+    v3): an arbitrary or self-referential table name must not corroborate
+    a contradiction. Fail-closed: any query error or an absent edge
+    refuses."""
+    import json as _json
+    import re as _re
+    import urllib.request as _request
+
+    m = _re.match(
+        r"urn:li:dataset:\(urn:li:dataPlatform:([^,]+),([^,]+),([A-Z]+)\)$",
+        asset_urn,
+    )
+    if not m:
+        return False, f"refused: cannot parse asset urn {asset_urn!r}"
+    platform, name, env = m.groups()
+    # A qualified reference name is taken as-is; a bare one inherits the
+    # suspect's schema prefix, and a prefix exists only when the suspect
+    # name is itself qualified (PR #11 finding: unconditional rsplit
+    # mangled unqualified names).
+    if "." in reference_table:
+        ref_name = reference_table
+    elif "." in name:
+        ref_name = f"{name.rsplit('.', 1)[0]}.{reference_table}"
+    else:
+        ref_name = reference_table
+    ref_urn = (
+        f"urn:li:dataset:(urn:li:dataPlatform:{platform},{ref_name},{env})"
+    )
+    if ref_urn == asset_urn:
+        # A self-edge in the catalog proves nothing about independence
+        # (PR #11 finding): the suspect can never corroborate itself.
+        return False, "refused: reference resolves to the suspect asset itself"
+    query = (
+        "query($urn:String!,$start:Int!){ dataset(urn:$urn){ lineage(input:{"
+        "direction:UPSTREAM,start:$start,count:100}){ total relationships{"
+        " entity{ urn } } } } }"
+    )
+    start = 0
+    for _ in range(20):  # bound: 2000 upstream relationships
+        payload = _json.dumps(
+            {"query": query, "variables": {"urn": asset_urn, "start": start}}
+        ).encode()
+        req = _request.Request(
+            f"{gms_url}/api/graphql", data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with _request.urlopen(req, timeout=15) as resp:
+                out = _json.loads(resp.read())
+            if out.get("errors"):
+                return False, (
+                    f"refused: lineage query errors {str(out['errors'])[:120]}"
+                )
+            lineage = (((out.get("data") or {}).get("dataset") or {})
+                       .get("lineage") or {})
+            rels = lineage.get("relationships") or []
+            upstreams = {((r or {}).get("entity") or {}).get("urn")
+                         for r in rels}
+        except Exception as e:
+            return False, f"refused: lineage query failed ({str(e)[:120]})"
+        if ref_urn in upstreams:
+            return True, f"lineage-verified upstream: {ref_urn}"
+        start += len(rels)
+        if not rels or start >= int(lineage.get("total") or 0):
+            break
+    return False, (
+        f"refused: {reference_table} is not a catalog-verified upstream "
+        f"of the asset"
+    )
+
+
+def unresolved_unit_suspicion(findings) -> bool:
+    """A cents-signature unit claim this run could NOT adjudicate (nothing
+    declared, or declared and uncorroborated) is OUTSTANDING suspicion: a
+    run carrying one must never clear a standing incident (PR #11
+    finding: a configuration omission is not fresh evidence). The
+    signature is read from the finding's own evidence, top-level only
+    (no-rubric findings nest measurements and never match)."""
+    from notary.types import ClaimType, Verdict
+
+    for f in findings:
+        if (
+            f.verdict is Verdict.UNVERIFIABLE
+            and f.claim.claim_type is ClaimType.UNIT_SCALE
+        ):
+            e = f.evidence or {}
+            if (
+                e.get("integer_share") == 1.0
+                and float(e.get("median") or 0) > 1000
+            ):
+                return True
+    return False
+
+
 def parse_reconcile_args(items: list[str]) -> dict:
     """Parse repeatable --reconcile declarations
     (FIELD=TABLE:SUSPECT_KEY:REFERENCE_KEY:REFERENCE_COLUMN) into
     {field_path: Reconciliation}. Pure; raises ValueError on any
-    malformed item."""
+    malformed item. Every part must be a bare SQL identifier: the probe
+    layer addresses a single warehouse schema, and a qualified name
+    accepted here would crash probe planning after passing the lineage
+    gate (PR #11 finding)."""
+    from notary.probe import _IDENT
     from notary.types import Reconciliation
 
     out: dict = {}
@@ -91,6 +193,11 @@ def parse_reconcile_args(items: list[str]) -> dict:
             raise ValueError(
                 "--reconcile expects FIELD=TABLE:SUSPECT_KEY:"
                 f"REFERENCE_KEY:REFERENCE_COLUMN, got {item!r}"
+            )
+        if not all(_IDENT.match(x) for x in (field, *parts)):
+            raise ValueError(
+                "--reconcile parts must be bare SQL identifiers "
+                f"(single warehouse schema today), got {item!r}"
             )
         out[field] = Reconciliation(*parts)
     return out
@@ -282,18 +389,32 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Reconciliation sources are operator-declared; demo mode carries
         # the manifest's declarations, real runs the --reconcile flags.
-        # Without one, a unit distribution can only ever reach
+        # A declaration only counts once the catalog verifies the source
+        # is a lineage upstream of the suspect (judge-slice v3); without
+        # a verified one, a unit distribution can only ever reach
         # UNVERIFIABLE (rubric v2, judge-review P0).
         table = _urn_table(args.asset)
-        findings = [
-            adjudicate(claim, run_probe(plan_probe(
-                claim, as_of=run_date,
-                reconciliation=MANIFEST.reconciliations.get(
-                    (table, claim.field_path)
-                ) if args.demo else reconcile_map.get(claim.field_path),
-            ), con))
-            for claim in claims
-        ]
+        findings = []
+        recon_refusals = 0
+        for claim in claims:
+            recon = (
+                MANIFEST.reconciliations.get((table, claim.field_path))
+                if args.demo else reconcile_map.get(claim.field_path)
+            )
+            if recon is not None:
+                ok, detail = lineage_verified_upstream(
+                    args.gms, args.asset, recon.table
+                )
+                print(
+                    f"[reconciliation] {claim.field_path or '(table)'}: "
+                    f"{detail}"
+                )
+                if not ok:
+                    recon = None
+                    recon_refusals += 1
+            findings.append(adjudicate(claim, run_probe(plan_probe(
+                claim, as_of=run_date, reconciliation=recon,
+            ), con)))
     finally:
         con.close()
 
@@ -332,6 +453,17 @@ def main(argv: list[str] | None = None) -> int:
         incident_urn, created = raise_incident_idempotent(args.gms, draft)
         verb = "raised" if created else "already open"
         print(f"incident {verb}: {incident_urn}")
+    elif recon_refusals or unresolved_unit_suspicion(findings):
+        # A refused reconciliation or an outstanding cents-signature
+        # suspicion downgraded this run (PR #11 findings): the quiet
+        # verdict may reflect a lineage failure or a missing declaration,
+        # not the warehouse, so a standing incident must NOT be cleared.
+        print(
+            "incident left untouched: this run carries "
+            f"{recon_refusals} reconciliation refusal(s) and/or an "
+            "unadjudicated cents-signature suspicion; a downgraded "
+            "verdict never clears an alert"
+        )
     else:
         # lifecycle (cycle-3 finding): a clean run resolves the incident it
         # made obsolete instead of leaving a stale page

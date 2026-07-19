@@ -44,7 +44,7 @@ def test_cents_lie_is_contradicted(warehouse):
     recon = MANIFEST.reconciliations[("fct_payments", "amount")]
     spec = plan_probe(claim, reconciliation=recon)
     assert "fct_payments" in spec.sql
-    assert "stg_billing_totals" in spec.sql
+    assert "billing_invoices" in spec.sql
     result = run_probe(spec, warehouse)
     assert result.error is None
     finding = adjudicate(claim, result)
@@ -53,6 +53,22 @@ def test_cents_lie_is_contradicted(warehouse):
     assert finding.evidence["median"] > 1000
     assert finding.evidence["recon_ratio_share"] == 1.0
     assert finding.rationale
+
+
+def test_canonical_billing_major_units_control_is_confirmed(warehouse):
+    """Judge-slice v3: the canonical billing ledger's truthful major-units
+    claim earns CONFIRMED from distribution (cent fractions are impossible
+    under integer minor-unit storage; the rubric applies to any major-unit
+    money claim, not only the USD spelling)."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.billing_invoices,PROD)",
+        field_path="total_major", claim_type=ClaimType.UNIT_SCALE,
+        text="Canonical invoice total in major currency units from the "
+             "billing system.",
+        predicate={"unit": "major_currency_units"},
+    )
+    finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
+    assert finding.verdict is Verdict.CONFIRMED
 
 
 def test_truthful_price_control_is_confirmed(warehouse):
@@ -1032,13 +1048,13 @@ def test_reconcile_flag_parses_into_reconciliations():
     from notary.run import parse_reconcile_args
 
     m = parse_reconcile_args(
-        ["amount=stg_billing_totals:order_id:order_id:total_usd"]
+        ["amount=billing_invoices:order_id:order_id:total_major"]
     )
     r = m["amount"]
-    assert r.table == "stg_billing_totals"
+    assert r.table == "billing_invoices"
     assert r.suspect_key == "order_id"
     assert r.reference_key == "order_id"
-    assert r.reference_column == "total_usd"
+    assert r.reference_column == "total_major"
     with pytest.raises(ValueError):
         parse_reconcile_args(["missing-equals-sign"])
     with pytest.raises(ValueError):

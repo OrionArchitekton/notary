@@ -259,3 +259,52 @@ def test_stacked_corrections_drain_to_the_original():
     )
     assert drain_corrections(outer) == "Original human text."
     assert drain_corrections("Plain text.") is None
+
+
+def test_incident_drain_exhaustion_is_a_failed_leg_not_success(monkeypatch):
+    """Pipeline finding (PR #10 cycle 3, deferred to v3): exhausting the
+    drain loop without two consecutive empty reads must FAIL the leg and
+    retain the ledger, never report success over an undrained incident."""
+    import itertools
+
+    import notary.rollback as rb
+
+    monkeypatch.setattr(
+        rb, "_read_structured_properties", lambda g, a: _notary_props(rb)
+    )
+    monkeypatch.setattr(rb, "read_descriptions", lambda g, a: {})
+    monkeypatch.setattr(rb, "_document_info", lambda g, u: {
+        "title": "Notary evidence: fct_payments.amount (2026-07-18)",
+        "relatedAssets": [_ASSET], "contents": _NOTARY_CONTENTS,
+    })
+    monkeypatch.setattr(rb, "_search_notary_documents", lambda g, a: [])
+    monkeypatch.setattr(rb, "_soft_delete", lambda g, urns: None)
+    counter = itertools.count()
+    monkeypatch.setattr(
+        rb, "find_open_notary_incident",
+        lambda g, a, t: f"urn:li:incident:endless-{next(counter)}",
+    )
+    monkeypatch.setattr(rb, "resolve_incident", lambda g, u, note: None)
+    monkeypatch.setattr(rb.time, "sleep", lambda s: None)
+    removed = []
+    monkeypatch.setattr(
+        rb, "_remove_structured_properties",
+        lambda g, a, urns: removed.append(urns),
+    )
+    rc = rb.main(["--asset", _ASSET])
+    assert rc == 1
+    assert removed == []
+
+
+def test_restore_description_false_result_raises(monkeypatch):
+    """A valid GraphQL response carrying updateDescription=false is a
+    FAILED restore and must raise, so the field lands in the refused list
+    instead of being reported restored."""
+    import notary.rollback as rb
+
+    monkeypatch.setattr(
+        rb, "_graphql", lambda g, q, v: {"updateDescription": False}
+    )
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        rb._restore_description("http://gms", _ASSET, "amount", "text")

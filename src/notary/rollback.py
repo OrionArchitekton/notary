@@ -152,12 +152,19 @@ def _restore_description(
     if field:
         variables["input"]["subResource"] = field
         variables["input"]["subResourceType"] = "DATASET_FIELD"
-    _graphql(
+    data = _graphql(
         gms_url,
         "mutation($input: DescriptionUpdateInput!) "
         "{ updateDescription(input: $input) }",
         variables,
     )
+    # A valid response carrying false is a FAILED restore (same class as
+    # the batchUpdateSoftDeleted check): report it, never claim restored.
+    if data.get("updateDescription") is not True:
+        raise RuntimeError(
+            f"updateDescription returned "
+            f"{data.get('updateDescription')!r} for {field or '(table)'}"
+        )
 
 
 def _document_info(gms_url: str, doc_urn: str) -> dict:
@@ -318,7 +325,20 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             resolve_incident(args.gms, incident, note="Rolled back by Notary")
             resolved_incidents.append(incident)
-        receipt["legs"]["incident"] = {"resolved": resolved_incidents or None}
+        if empty_reads >= 2:
+            receipt["legs"]["incident"] = {
+                "resolved": resolved_incidents or None
+            }
+        else:
+            # Loop bound exhausted without two consecutive empty reads:
+            # the drain is UNCONFIRMED and must fail the leg (PR #10
+            # cycle-3 finding: success here would remove the ledger over
+            # an undrained incident).
+            receipt["legs"]["incident"] = {
+                "resolved": resolved_incidents or None,
+                "error": "drain bound exhausted before two empty reads",
+            }
+            failed = True
     except Exception as e:
         receipt["legs"]["incident"] = {"error": str(e)[:200]}
         failed = True
