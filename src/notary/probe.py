@@ -11,7 +11,7 @@ from datetime import date, datetime
 
 import duckdb
 
-from notary.types import Claim, ClaimType, ProbeResult, ProbeSpec
+from notary.types import Claim, ClaimType, ProbeResult, ProbeSpec, Reconciliation
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -43,13 +43,53 @@ def _urn_dataset_name(asset_urn: str) -> str:
     return name
 
 
-def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
+def plan_probe(
+    claim: Claim,
+    as_of: str | None = None,
+    reconciliation: "Reconciliation | None" = None,
+) -> ProbeSpec:
     """Plan the measurement SQL for a claim. Pure; never touches the DB."""
     table = _urn_table(claim.asset_urn)
     if claim.claim_type is ClaimType.UNIT_SCALE and claim.field_path:
         col = claim.field_path
         if not _IDENT.match(col):
             raise ValueError(f"unsafe column identifier: {col!r}")
+        recon_select = ""
+        recon_join = ""
+        recon_keys: tuple[str, ...] = ()
+        if reconciliation is not None:
+            for ident in (
+                reconciliation.table, reconciliation.suspect_key,
+                reconciliation.reference_key, reconciliation.reference_column,
+            ):
+                if not _IDENT.match(ident):
+                    raise ValueError(f"unsafe reconciliation identifier: {ident!r}")
+            # Bounded join of the suspect prefix against the declared
+            # reference prefix: per-key ratio suspect/reference. A true
+            # cents-as-dollars load sits at exactly 100x the major-unit
+            # reference; the tolerance absorbs float representation only.
+            recon_join = (
+                f', recon as (select count(*) as recon_joined, '
+                f'avg(case when r."{reconciliation.reference_column}" = 0 '
+                f'then 0.0 when abs(s.v / r."{reconciliation.reference_column}" '
+                f'- 100.0) <= 0.5 then 1.0 else 0.0 end) as recon_ratio_share '
+                f'from (select "{reconciliation.suspect_key}" as k, "{col}" as v '
+                f'from "{table}" limit {SCAN_LIMIT}) s '
+                f'join (select "{reconciliation.reference_key}" as rk, '
+                f'"{reconciliation.reference_column}" from '
+                f'"{reconciliation.table}" limit {SCAN_LIMIT}) r on s.k = r.rk '
+                f'where s.v is not null) '
+            )
+            recon_select = (
+                ", recon.recon_joined, recon.recon_ratio_share, "
+                f"(select count(*) from (select 1 from "
+                f'"{reconciliation.table}" limit {SCAN_LIMIT})) '
+                "as recon_reference_rows_scanned"
+            )
+            recon_keys = (
+                "recon_joined", "recon_ratio_share",
+                "recon_reference_rows_scanned",
+            )
         # LIMIT bounds the rows READ, so the null filter sits OUTSIDE the
         # bounded subquery (cycle-3 finding: filtering first scans a sparse
         # table until it finds SCAN_LIMIT non-null values)
@@ -62,7 +102,7 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
         # prefix previously shrank the post-filter count under the limit
         # and defeated the complete-scan guard.
         sql = (
-            f'select median(v) as median, '
+            f'with base as (select median(v) as median, '
             f'avg(case when v is null then null '
             f'when v = floor(v) then 1.0 else 0.0 end) as integer_share, '
             f'avg(case when v is null then null '
@@ -71,7 +111,10 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
             f'min(v) as min, max(v) as max, count(v) as row_count, '
             f'count(*) as rows_scanned, '
             f'{SCAN_LIMIT} as scan_limit '
-            f'from (select "{col}" as v from "{table}" limit {SCAN_LIMIT})'
+            f'from (select "{col}" as v from "{table}" limit {SCAN_LIMIT}))'
+            f'{recon_join} '
+            f'select base.*{recon_select} from base'
+            f'{", recon" if reconciliation is not None else ""}'
         )
         return ProbeSpec(
             claim=claim,
@@ -79,7 +122,7 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
             measure_keys=(
                 "median", "integer_share", "centi_integer_share",
                 "min", "max", "row_count", "rows_scanned", "scan_limit",
-            ),
+            ) + recon_keys,
         )
     if claim.claim_type is ClaimType.COMPLETENESS and claim.field_path:
         col = claim.field_path

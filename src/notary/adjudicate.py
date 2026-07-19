@@ -27,12 +27,19 @@ _CENTS_MEDIAN_FLOOR = 1000
 _DOLLARS_FRACTIONAL_FLOOR = 0.3
 _DOLLARS_MEDIAN_CEILING = 1000
 
+_RECON_JOIN_FLOOR = 100
+
 _RUBRIC_TEXT = (
     f"CONTRADICTED iff integer_share == {_CENTS_INTEGER_SHARE} and median > "
-    f"{_CENTS_MEDIAN_FLOOR}; CONFIRMED iff fractional_share >= "
-    f"{_DOLLARS_FRACTIONAL_FLOOR} and 0 < median <= {_DOLLARS_MEDIAN_CEILING}; "
-    f"otherwise UNVERIFIABLE; either verdict requires a complete scan "
-    f"(under the scan limit)"
+    f"{_CENTS_MEDIAN_FLOOR} AND a declared reconciliation corroborates "
+    f"(>= {_RECON_JOIN_FLOOR} joined keys, every ratio at 100x, reference "
+    f"scan complete); the distribution alone is suspicion and falls to "
+    f"UNVERIFIABLE. CONFIRMED iff fractional_share >= "
+    f"{_DOLLARS_FRACTIONAL_FLOOR} and 0 < median <= {_DOLLARS_MEDIAN_CEILING} "
+    f"(fractional values are impossible under integer-cents storage, so the "
+    f"dollars confirmation is earned by distribution); otherwise "
+    f"UNVERIFIABLE; every verdict requires a complete scan (under the scan "
+    f"limit)"
 )
 
 
@@ -187,13 +194,53 @@ def _adjudicate_unit_scale(claim: Claim, result: ProbeResult) -> Finding:
             ),
         )
     if integer_share == _CENTS_INTEGER_SHARE and median > _CENTS_MEDIAN_FLOOR:
+        # Rubric v2 (judge-review P0): the cents signature alone is
+        # SUSPICION, not proof; legitimate whole-dollar amounts match it.
+        # Contradiction must be corroborated by the operator-declared
+        # reconciliation source measuring every joined key at 100x.
+        recon_joined = m.get("recon_joined")
+        if recon_joined is None:
+            return Finding(
+                claim=claim,
+                verdict=Verdict.UNVERIFIABLE,
+                evidence=evidence,
+                rationale=(
+                    f"every value is an integer with median {median:.0f}, "
+                    f"consistent with integer cents, but distribution alone "
+                    f"cannot prove the unit and no reconciliation source is "
+                    f"declared; refusing to guess"
+                ),
+            )
+        recon_share = float(m.get("recon_ratio_share") or 0.0)
+        ref_scanned = int(m.get("recon_reference_rows_scanned") or 0)
+        scan_limit_val = int(m.get("scan_limit") or 0)
+        evidence["recon_joined"] = int(recon_joined)
+        evidence["recon_ratio_share"] = recon_share
+        evidence["recon_reference_rows_scanned"] = ref_scanned
+        if (
+            int(recon_joined) >= _RECON_JOIN_FLOOR
+            and recon_share == 1.0
+            and 0 < ref_scanned < scan_limit_val
+        ):
+            return Finding(
+                claim=claim,
+                verdict=Verdict.CONTRADICTED,
+                evidence=evidence,
+                rationale=(
+                    f"described as {unit} but every value is an integer with "
+                    f"median {median:.0f}; consistent with integer cents, not dollars"
+                ),
+            )
         return Finding(
             claim=claim,
-            verdict=Verdict.CONTRADICTED,
+            verdict=Verdict.UNVERIFIABLE,
             evidence=evidence,
             rationale=(
-                f"described as {unit} but every value is an integer with "
-                f"median {median:.0f}; consistent with integer cents, not dollars"
+                f"every value is an integer with median {median:.0f}, "
+                f"consistent with integer cents, but the declared "
+                f"reconciliation did not corroborate a 100x scale "
+                f"(joined={int(recon_joined)}, ratio_share={recon_share:.2f}); "
+                f"refusing to guess"
             ),
         )
     if (

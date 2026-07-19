@@ -36,15 +36,22 @@ def _claim(table: str, column: str, text: str, unit: str) -> Claim:
 
 
 def test_cents_lie_is_contradicted(warehouse):
+    """Rubric v2: the contradiction is EARNED by the declared reconciliation
+    (billing's dollar export at exactly 100x), not by distribution alone."""
+    from notary.demo.seeder import MANIFEST
+
     claim = _claim("fct_payments", "amount", "Transaction amount in USD.", "USD")
-    spec = plan_probe(claim)
+    recon = MANIFEST.reconciliations[("fct_payments", "amount")]
+    spec = plan_probe(claim, reconciliation=recon)
     assert "fct_payments" in spec.sql
+    assert "stg_billing_totals" in spec.sql
     result = run_probe(spec, warehouse)
     assert result.error is None
     finding = adjudicate(claim, result)
     assert finding.verdict is Verdict.CONTRADICTED
     assert finding.evidence["integer_share"] == 1.0
     assert finding.evidence["median"] > 1000
+    assert finding.evidence["recon_ratio_share"] == 1.0
     assert finding.rationale
 
 
@@ -852,4 +859,56 @@ def test_capped_scan_cannot_confirm_percent_scale(tmp_path):
         finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
     finally:
         ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_whole_dollar_invoices_are_unverifiable(tmp_path):
+    """Judge-review P0 regression (rubric v2): legitimate whole-dollar
+    invoices are all-integer with a high median, which matches the cents
+    signature, but distribution alone cannot prove the unit. Without a
+    declared reconciliation source the verdict is UNVERIFIABLE, never
+    CONTRADICTED."""
+    db = tmp_path / "inv.duckdb"
+    con0 = duckdb.connect(str(db))
+    con0.execute("create table invoices (amount bigint)")
+    con0.execute(
+        "insert into invoices values (1500), (2000), (2500), (3000), "
+        "(1527), (4250)"
+    )
+    con0.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.invoices,PROD)",
+            field_path="amount", claim_type=ClaimType.UNIT_SCALE,
+            text="Invoice amount in USD.", predicate={"unit": "USD"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+    assert "reconciliation" in finding.rationale
+
+
+def test_cents_lie_without_reconciliation_is_unverifiable(warehouse):
+    """Rubric v2: even the flagship cents distribution is only suspicion
+    without the declared reconciliation source."""
+    claim = _claim("fct_payments", "amount", "Transaction amount in USD.", "USD")
+    finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_reconciliation_that_does_not_corroborate_stays_unverifiable(warehouse):
+    """Rubric v2: a declared reconciliation that measures a ratio away from
+    100x fails to corroborate; the verdict stays UNVERIFIABLE."""
+    from notary.types import Reconciliation
+
+    bad = Reconciliation(
+        table="fct_payments", suspect_key="payment_id",
+        reference_key="payment_id", reference_column="amount",
+    )  # ratio 1.0 against itself: no corroboration
+    claim = _claim("fct_payments", "amount", "Transaction amount in USD.", "USD")
+    finding = adjudicate(
+        claim, run_probe(plan_probe(claim, reconciliation=bad), warehouse)
+    )
     assert finding.verdict is Verdict.UNVERIFIABLE

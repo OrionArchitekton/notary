@@ -241,8 +241,17 @@ def main(argv: list[str] | None = None) -> int:
         build_warehouse(db, seed=DEFAULT_SEED)
     con = duckdb.connect(str(db), read_only=True)
     try:
+        # Reconciliation sources are operator-declared; demo mode carries
+        # the manifest's declarations. Without one, a unit distribution can
+        # only ever reach UNVERIFIABLE (rubric v2, judge-review P0).
+        table = _urn_table(args.asset)
         findings = [
-            adjudicate(claim, run_probe(plan_probe(claim, as_of=run_date), con))
+            adjudicate(claim, run_probe(plan_probe(
+                claim, as_of=run_date,
+                reconciliation=MANIFEST.reconciliations.get(
+                    (table, claim.field_path)
+                ) if args.demo else None,
+            ), con))
             for claim in claims
         ]
     finally:

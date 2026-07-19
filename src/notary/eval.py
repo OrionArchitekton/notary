@@ -249,7 +249,12 @@ def evaluate(
             error = f"{type(e).__name__}: {e}"
         else:
             findings = tuple(
-                adjudicate(claim, run_probe(plan_probe(claim, as_of=as_of), con))
+                adjudicate(claim, run_probe(plan_probe(
+                    claim, as_of=as_of,
+                    reconciliation=manifest.reconciliations.get(
+                        (entry.table, claim.field_path)
+                    ),
+                ), con))
                 for claim in claims
             )
         results.append(score_entry(entry, findings, extraction_error=error))
