@@ -148,7 +148,11 @@ README and demo.
   moments before replacing the description without compare-and-swap (the
   catalog API offers none), so a human edit landing inside that window is
   superseded by the correction and its restore returns the pre-window text;
-  the correction's provenance label and reversibility bound the damage.
+  the correction's provenance label and reversibility bound the damage. The
+  same no-CAS window applies to lineage registration: existing upstreams are
+  read and merged before the wholesale-replace aspect write, so an edge added
+  by another writer inside that window is dropped from the emitted snapshot
+  (demo ingestion targets only its own seeded fiction datasets).
 - **Safety**: Notary edits only metadata surfaces, never warehouse data. Probes
   are read-only SQL with bounded scan cost.
 - **No Cloud dependency**: every surface used exists in DataHub OSS quickstart.
