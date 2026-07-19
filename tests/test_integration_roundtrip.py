@@ -437,17 +437,30 @@ def test_s5_next_agent_inherits_the_verdict(ingested, tmp_path):
     out = s5.stdout
     view1 = out.split("view 2")[0]
     view2 = out.split("view 2")[1]
-    assert "USD" in view1  # repeats the catalog description
+    # pre-Notary view: reports the catalog's USD description and, having no
+    # ledger, must carry NO contradiction verdict and NO measured evidence
+    assert "USD" in view1
     assert "cents" not in view1.lower()
-    assert "cents" in view2.lower()  # quotes the verified measurement
+    assert "contradicted" not in view1.lower()
+    assert "12795" not in view1
+    # ledger view: refuses the claim and quotes the verified measurement
+    assert "contradicted" in view2.lower()
+    assert "cents" in view2.lower()
     assert "12795" in view2  # the measured median, not a fabrication
 
-    # clean up the incident this notarize raised
+    # clean up the incident this notarize raised; the cleanup itself is
+    # asserted so an expired poll cannot silently leak an ACTIVE incident
     from notary.incidents import close_obsolete_incident, incident_title, find_open_notary_incident
     import time
-    deadline = time.monotonic() + 15
+    found = None
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        if find_open_notary_incident(GMS, PAYMENTS_URN, incident_title(PAYMENTS_URN)):
+        found = find_open_notary_incident(
+            GMS, PAYMENTS_URN, incident_title(PAYMENTS_URN)
+        )
+        if found:
             break
         time.sleep(1)
-    close_obsolete_incident(GMS, PAYMENTS_URN, run_date="2026-07-18")
+    assert found, "raised incident never became query-visible for cleanup"
+    resolved = close_obsolete_incident(GMS, PAYMENTS_URN, run_date="2026-07-18")
+    assert resolved == found
