@@ -97,6 +97,63 @@ _DUCK_TO_SQL = {
 }
 
 
+def _merged_upstreams(
+    existing: "list[str]", declared: "list[str]",
+) -> list[str]:
+    """Existing catalog upstreams first, declared edges appended, deduped:
+    the UpstreamLineage aspect replaces wholesale, so an emission that
+    carried only the declared edges would silently delete pre-existing
+    relationships (PR #11 finding)."""
+    merged = list(existing)
+    for urn in declared:
+        if urn not in merged:
+            merged.append(urn)
+    return merged
+
+
+def _existing_upstreams(gms_url: str, downstream_urn: str) -> list[str]:
+    """Current upstream dataset urns for an entity, paged and bounded.
+    Raises on any query failure: emitting a replace over an unknown
+    pre-image would be unrecoverable data loss (fail-closed)."""
+    import json as _json
+    import urllib.request as _request
+
+    query = (
+        "query($urn:String!,$start:Int!){ dataset(urn:$urn){ lineage(input:{"
+        "direction:UPSTREAM,start:$start,count:100}){ total relationships{"
+        " entity{ urn } } } } }"
+    )
+    urns: list[str] = []
+    start = 0
+    for _ in range(20):
+        payload = _json.dumps(
+            {"query": query,
+             "variables": {"urn": downstream_urn, "start": start}}
+        ).encode()
+        req = _request.Request(
+            f"{gms_url}/api/graphql", data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with _request.urlopen(req, timeout=15) as resp:
+            out = _json.loads(resp.read())
+        if out.get("errors"):
+            raise RuntimeError(str(out["errors"])[:200])
+        lineage = (((out.get("data") or {}).get("dataset") or {})
+                   .get("lineage") or {})
+        rels = lineage.get("relationships") or []
+        for r in rels:
+            urn = ((r or {}).get("entity") or {}).get("urn")
+            if urn:
+                urns.append(urn)
+        start += len(rels)
+        if not rels or start >= int(lineage.get("total") or 0):
+            return urns
+    raise RuntimeError(
+        f"upstream lineage truncated at {start}; refusing to emit a "
+        f"replace over an unknown pre-image"
+    )
+
+
 def _grouped_lineage(
     lineage: "tuple[tuple[str, str], ...]",
 ) -> dict[str, list[str]]:
@@ -160,16 +217,24 @@ def ingest_manifest(db_path: str | Path, manifest, gms_url: str) -> list[str]:
             from datahub.emitter.rest_emitter import DatahubRestEmitter
 
             emitter = DatahubRestEmitter(gms_server=gms_url)
-            # One MCE per downstream carrying ALL its upstreams: the
-            # UpstreamLineage aspect is a full replace, so per-edge
-            # emission would keep only the last edge (PR #11 finding).
+            # One MCE per downstream carrying the MERGE of what the
+            # catalog already records and ALL declared upstreams: the
+            # UpstreamLineage aspect is a full replace, so per-edge or
+            # declared-only emission would silently delete relationships
+            # (PR #11 findings). The pre-image read fails closed.
             for downstream, upstreams in _grouped_lineage(lineage).items():
-                emitter.emit(make_lineage_mce(
-                    [make_dataset_urn(
-                        "duckdb", f"fiction_retail.{u}", "PROD")
-                     for u in upstreams],
+                down_urn = make_dataset_urn(
+                    "duckdb", f"fiction_retail.{downstream}", "PROD")
+                declared = [
                     make_dataset_urn(
-                        "duckdb", f"fiction_retail.{downstream}", "PROD"),
+                        "duckdb", f"fiction_retail.{u}", "PROD")
+                    for u in upstreams
+                ]
+                emitter.emit(make_lineage_mce(
+                    _merged_upstreams(
+                        _existing_upstreams(gms_url, down_urn), declared
+                    ),
+                    down_urn,
                 ))
             emitter.flush()
         return urns

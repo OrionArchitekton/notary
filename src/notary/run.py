@@ -151,11 +151,38 @@ def lineage_verified_upstream(
     )
 
 
+def unresolved_unit_suspicion(findings) -> bool:
+    """A cents-signature unit claim this run could NOT adjudicate (nothing
+    declared, or declared and uncorroborated) is OUTSTANDING suspicion: a
+    run carrying one must never clear a standing incident (PR #11
+    finding: a configuration omission is not fresh evidence). The
+    signature is read from the finding's own evidence, top-level only
+    (no-rubric findings nest measurements and never match)."""
+    from notary.types import ClaimType, Verdict
+
+    for f in findings:
+        if (
+            f.verdict is Verdict.UNVERIFIABLE
+            and f.claim.claim_type is ClaimType.UNIT_SCALE
+        ):
+            e = f.evidence or {}
+            if (
+                e.get("integer_share") == 1.0
+                and float(e.get("median") or 0) > 1000
+            ):
+                return True
+    return False
+
+
 def parse_reconcile_args(items: list[str]) -> dict:
     """Parse repeatable --reconcile declarations
     (FIELD=TABLE:SUSPECT_KEY:REFERENCE_KEY:REFERENCE_COLUMN) into
     {field_path: Reconciliation}. Pure; raises ValueError on any
-    malformed item."""
+    malformed item. Every part must be a bare SQL identifier: the probe
+    layer addresses a single warehouse schema, and a qualified name
+    accepted here would crash probe planning after passing the lineage
+    gate (PR #11 finding)."""
+    from notary.probe import _IDENT
     from notary.types import Reconciliation
 
     out: dict = {}
@@ -166,6 +193,11 @@ def parse_reconcile_args(items: list[str]) -> dict:
             raise ValueError(
                 "--reconcile expects FIELD=TABLE:SUSPECT_KEY:"
                 f"REFERENCE_KEY:REFERENCE_COLUMN, got {item!r}"
+            )
+        if not all(_IDENT.match(x) for x in (field, *parts)):
+            raise ValueError(
+                "--reconcile parts must be bare SQL identifiers "
+                f"(single warehouse schema today), got {item!r}"
             )
         out[field] = Reconciliation(*parts)
     return out
@@ -421,13 +453,16 @@ def main(argv: list[str] | None = None) -> int:
         incident_urn, created = raise_incident_idempotent(args.gms, draft)
         verb = "raised" if created else "already open"
         print(f"incident {verb}: {incident_urn}")
-    elif recon_refusals:
-        # A refused reconciliation downgraded this run (PR #11 finding):
-        # the quiet verdict may reflect a lineage/query failure, not the
-        # warehouse, so a standing incident must NOT be cleared by it.
+    elif recon_refusals or unresolved_unit_suspicion(findings):
+        # A refused reconciliation or an outstanding cents-signature
+        # suspicion downgraded this run (PR #11 findings): the quiet
+        # verdict may reflect a lineage failure or a missing declaration,
+        # not the warehouse, so a standing incident must NOT be cleared.
         print(
-            f"incident left untouched: {recon_refusals} reconciliation "
-            f"refusal(s) this run; a downgraded verdict never clears an alert"
+            "incident left untouched: this run carries "
+            f"{recon_refusals} reconciliation refusal(s) and/or an "
+            "unadjudicated cents-signature suspicion; a downgraded "
+            "verdict never clears an alert"
         )
     else:
         # lifecycle (cycle-3 finding): a clean run resolves the incident it

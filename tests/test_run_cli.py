@@ -331,8 +331,8 @@ def test_recon_refusal_blocks_obsolete_incident_resolution():
     from notary import run as run_mod
 
     src = inspect.getsource(run_mod.main)
-    assert "elif recon_refusals:" in src
-    idx_refusal = src.index("elif recon_refusals:")
+    assert "elif recon_refusals or unresolved_unit_suspicion(findings):" in src
+    idx_refusal = src.index("elif recon_refusals")
     idx_close = src.index("close_obsolete_incident")
     assert idx_refusal < idx_close
 
@@ -352,3 +352,67 @@ def test_lineage_edges_group_by_downstream():
         "payments": ["billing", "ledger"],
         "reporting": ["payments"],
     }
+
+
+def test_unresolved_unit_suspicion_blocks_incident_clearing():
+    """PR #11 cycle-2 finding: a cents-signature unit claim this run could
+    not adjudicate (nothing declared, or declared and uncorroborated) is
+    OUTSTANDING suspicion; a run carrying one must never clear a standing
+    incident. A configuration omission is not fresh evidence."""
+    from notary.run import unresolved_unit_suspicion
+    from notary.types import Claim, ClaimType, Finding, Verdict
+
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)",
+        field_path="amount", claim_type=ClaimType.UNIT_SCALE,
+        text="Transaction amount in USD.", predicate={"unit": "USD"},
+    )
+    suspicious = Finding(
+        claim=claim, verdict=Verdict.UNVERIFIABLE,
+        evidence={"integer_share": 1.0, "median": 12795.0},
+        rationale="cents signature, nothing declared",
+    )
+    assert unresolved_unit_suspicion([suspicious])
+
+    confirmed = Finding(
+        claim=claim, verdict=Verdict.CONFIRMED,
+        evidence={"integer_share": 0.01, "median": 127.95},
+        rationale="dollars",
+    )
+    assert not unresolved_unit_suspicion([confirmed])
+
+    # a no-rubric UNVERIFIABLE nests measurements and carries no
+    # top-level cents signature: not suspicion
+    no_rubric = Finding(
+        claim=claim, verdict=Verdict.UNVERIFIABLE,
+        evidence={"measurements": {"integer_share": 1.0, "median": 5000}},
+        rationale="no v1 rubric",
+    )
+    assert not unresolved_unit_suspicion([no_rubric])
+
+
+def test_reconcile_flag_rejects_qualified_identifiers():
+    """PR #11 cycle-2 finding: the probe layer addresses one warehouse
+    schema with bare identifiers; a qualified reference accepted here
+    would crash plan_probe after passing the lineage gate."""
+    import pytest as _pytest
+
+    from notary.run import parse_reconcile_args
+
+    with _pytest.raises(ValueError):
+        parse_reconcile_args(["amount=finance.billing:order_id:order_id:total"])
+    with _pytest.raises(ValueError):
+        parse_reconcile_args(['amount=billing:order id:order_id:total'])
+
+
+def test_lineage_merge_preserves_existing_upstreams():
+    """PR #11 cycle-2 finding: the UpstreamLineage aspect replaces
+    wholesale, so declared edges must merge with what the catalog already
+    records, never silently drop it."""
+    from notary.catalog import _merged_upstreams
+
+    merged = _merged_upstreams(
+        existing=["urn:a", "urn:b"],
+        declared=["urn:b", "urn:c"],
+    )
+    assert merged == ["urn:a", "urn:b", "urn:c"]
