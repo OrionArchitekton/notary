@@ -90,6 +90,31 @@ def test_capture_rejects_corrupt_fixture(tmp_path):
     assert not out.with_suffix(".js").exists()
 
 
+def test_capture_rejects_unbound_s5_fixture(tmp_path):
+    """The ONE behavior this locks: an S5-noted fixture whose filename does
+    not match the prompt key recomputed from its stored user prompt (a
+    copied, renamed, or stray capture) aborts the run before anything is
+    written. Without the binding, the free-form note plus a substring is
+    the only selector, and a smuggled record can be published as the
+    same-asset before/after agent evidence."""
+    fixtures = tmp_path / "llm"
+    shutil.copytree(ROOT / "tests" / "fixtures" / "llm", fixtures)
+    s5 = next(
+        p for p in fixtures.glob("*.json")
+        if json.loads(p.read_text())
+        .get("meta", {}).get("note", "").startswith("S5")
+    )
+    record = json.loads(s5.read_text())
+    record["completion"] = "An unrelated completion smuggled in as evidence."
+    (fixtures / "ffffffffffffffffffffffff.json").write_text(
+        json.dumps(record)
+    )
+    r, out = _capture_with_fixtures(tmp_path, fixtures)
+    assert r.returncode != 0, (r.returncode, r.stdout)
+    assert not out.exists()
+    assert not out.with_suffix(".js").exists()
+
+
 def test_committed_web_assets_match_generated(tmp_path):
     """The ONE behavior this locks: the CHECKED-IN web/replay-data.json and
     web/replay-data.js (what the deployed page actually serves) are

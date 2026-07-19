@@ -24,9 +24,17 @@ import duckdb  # noqa: E402
 from notary.catalog import _corrected_description, _dossier_markdown  # noqa: E402
 from notary.demo.seeder import ANCHOR_DATE, DEFAULT_SEED, MANIFEST, build_warehouse  # noqa: E402
 from notary.eval import evaluate, missing_fixtures, unexpected_failures  # noqa: E402
-from notary.extract import ReplayLLM  # noqa: E402
+from notary.extract import ReplayLLM, _prompt_key  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from s5_next_agent import S5_SYSTEM, build_question  # noqa: E402
 
 PAYMENTS_TABLE = "fct_payments"
+FLAGSHIP_URN = (
+    "urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+    "fiction_retail.fct_payments,PROD)"
+)
 
 DISCLOSURE = (
     "This page replays a CAPTURED Notary run from the seeded demo warehouse "
@@ -38,14 +46,39 @@ DISCLOSURE = (
 
 
 def _s5_views(fixtures_dir: str) -> dict:
+    """Select the two S5 answer captures, fail-closed (pipeline finding:
+    the free-form note plus a substring was the only selector, so a copied
+    or stray S5-noted record could be published as the same-asset agent
+    evidence). Each record must (a) sit under the prompt key recomputed
+    from S5_SYSTEM plus its stored user prompt (the ReplayLLM binding
+    rule), (b) carry the flagship asset's question, and (c) fill an empty
+    view slot; any violation aborts before output is written."""
     views = {}
+    question = build_question(FLAGSHIP_URN)
     for path in glob.glob(f"{fixtures_dir}/*.json"):
-        record = json.loads(Path(path).read_text())
+        p = Path(path)
+        record = json.loads(p.read_text())
         note = (record.get("meta") or {}).get("note", "")
         if not note.startswith("S5 next-agent"):
             continue
         user = record.get("user", "")
+        if _prompt_key(S5_SYSTEM, user) != p.stem:
+            raise RuntimeError(
+                f"S5 fixture {p.name} does not match its prompt key "
+                f"(file copied, renamed, or edited?); refusing to publish "
+                f"it as captured agent evidence"
+            )
+        if question not in user:
+            raise RuntimeError(
+                f"S5 fixture {p.name} does not ask the flagship asset's "
+                f"question; refusing to publish it as same-asset evidence"
+            )
         key = "view2" if "trust ledger verdict" in user else "view1"
+        if key in views:
+            raise RuntimeError(
+                f"duplicate S5 capture for {key} ({p.name}); refusing to "
+                f"pick one silently"
+            )
         views[key] = record["completion"].strip()
     if set(views) != {"view1", "view2"}:
         raise RuntimeError(
