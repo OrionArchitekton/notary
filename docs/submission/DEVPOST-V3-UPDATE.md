@@ -44,5 +44,5 @@ While editing, confirm the hidden selections still read: category "Agents That
 Do Real Work", built with DataHub OSS/Core + MCP Server, and the OSS
 contribution + sample-output links present.
 
-Note: the test count above (156 total / 10 live) is the count at PR #11 head (150 passed);
+Note: the test count above (150 total / 10 live) is the count at PR #11 head;
 re-check `pytest -q` output at paste time and use the live number.
