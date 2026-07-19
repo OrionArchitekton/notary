@@ -95,35 +95,56 @@ def lineage_verified_upstream(
     if not m:
         return False, f"refused: cannot parse asset urn {asset_urn!r}"
     platform, name, env = m.groups()
-    prefix = name.rsplit(".", 1)[0]
+    # A qualified reference name is taken as-is; a bare one inherits the
+    # suspect's schema prefix, and a prefix exists only when the suspect
+    # name is itself qualified (PR #11 finding: unconditional rsplit
+    # mangled unqualified names).
+    if "." in reference_table:
+        ref_name = reference_table
+    elif "." in name:
+        ref_name = f"{name.rsplit('.', 1)[0]}.{reference_table}"
+    else:
+        ref_name = reference_table
     ref_urn = (
-        f"urn:li:dataset:(urn:li:dataPlatform:{platform},"
-        f"{prefix}.{reference_table},{env})"
+        f"urn:li:dataset:(urn:li:dataPlatform:{platform},{ref_name},{env})"
     )
+    if ref_urn == asset_urn:
+        # A self-edge in the catalog proves nothing about independence
+        # (PR #11 finding): the suspect can never corroborate itself.
+        return False, "refused: reference resolves to the suspect asset itself"
     query = (
-        "query($urn:String!){ dataset(urn:$urn){ lineage(input:{"
-        "direction:UPSTREAM,start:0,count:100}){ relationships{"
+        "query($urn:String!,$start:Int!){ dataset(urn:$urn){ lineage(input:{"
+        "direction:UPSTREAM,start:$start,count:100}){ total relationships{"
         " entity{ urn } } } } }"
     )
-    payload = _json.dumps(
-        {"query": query, "variables": {"urn": asset_urn}}
-    ).encode()
-    req = _request.Request(
-        f"{gms_url}/api/graphql", data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with _request.urlopen(req, timeout=15) as resp:
-            out = _json.loads(resp.read())
-        if out.get("errors"):
-            return False, f"refused: lineage query errors {str(out['errors'])[:120]}"
-        rels = ((((out.get("data") or {}).get("dataset") or {})
-                 .get("lineage") or {}).get("relationships") or [])
-        upstreams = {((r or {}).get("entity") or {}).get("urn") for r in rels}
-    except Exception as e:
-        return False, f"refused: lineage query failed ({str(e)[:120]})"
-    if ref_urn in upstreams:
-        return True, f"lineage-verified upstream: {ref_urn}"
+    start = 0
+    for _ in range(20):  # bound: 2000 upstream relationships
+        payload = _json.dumps(
+            {"query": query, "variables": {"urn": asset_urn, "start": start}}
+        ).encode()
+        req = _request.Request(
+            f"{gms_url}/api/graphql", data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with _request.urlopen(req, timeout=15) as resp:
+                out = _json.loads(resp.read())
+            if out.get("errors"):
+                return False, (
+                    f"refused: lineage query errors {str(out['errors'])[:120]}"
+                )
+            lineage = (((out.get("data") or {}).get("dataset") or {})
+                       .get("lineage") or {})
+            rels = lineage.get("relationships") or []
+            upstreams = {((r or {}).get("entity") or {}).get("urn")
+                         for r in rels}
+        except Exception as e:
+            return False, f"refused: lineage query failed ({str(e)[:120]})"
+        if ref_urn in upstreams:
+            return True, f"lineage-verified upstream: {ref_urn}"
+        start += len(rels)
+        if not rels or start >= int(lineage.get("total") or 0):
+            break
     return False, (
         f"refused: {reference_table} is not a catalog-verified upstream "
         f"of the asset"
@@ -342,6 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         # UNVERIFIABLE (rubric v2, judge-review P0).
         table = _urn_table(args.asset)
         findings = []
+        recon_refusals = 0
         for claim in claims:
             recon = (
                 MANIFEST.reconciliations.get((table, claim.field_path))
@@ -357,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if not ok:
                     recon = None
+                    recon_refusals += 1
             findings.append(adjudicate(claim, run_probe(plan_probe(
                 claim, as_of=run_date, reconciliation=recon,
             ), con)))
@@ -398,6 +421,14 @@ def main(argv: list[str] | None = None) -> int:
         incident_urn, created = raise_incident_idempotent(args.gms, draft)
         verb = "raised" if created else "already open"
         print(f"incident {verb}: {incident_urn}")
+    elif recon_refusals:
+        # A refused reconciliation downgraded this run (PR #11 finding):
+        # the quiet verdict may reflect a lineage/query failure, not the
+        # warehouse, so a standing incident must NOT be cleared by it.
+        print(
+            f"incident left untouched: {recon_refusals} reconciliation "
+            f"refusal(s) this run; a downgraded verdict never clears an alert"
+        )
     else:
         # lifecycle (cycle-3 finding): a clean run resolves the incident it
         # made obsolete instead of leaving a stale page

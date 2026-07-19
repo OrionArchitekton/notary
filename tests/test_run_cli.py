@@ -224,3 +224,131 @@ def test_lineage_gate_refuses_without_upstream_edge(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
     assert not ok and "refused" in detail
+
+
+def test_lineage_gate_rejects_self_reference_and_qualified_names(monkeypatch):
+    """PR #11 findings: a reference resolving to the suspect itself is
+    refused even when a self-edge exists in the catalog, a qualified
+    reference name is used as-is, and an unqualified suspect name gets no
+    invented prefix."""
+    import io
+    import json
+    import urllib.request
+
+    from notary.run import lineage_verified_upstream
+
+    urn = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+           "fiction_retail.fct_payments,PROD)")
+
+    def _resp(payload):
+        class _R(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return _R(json.dumps(payload).encode())
+
+    # self-edge in the catalog: still refused, no query needed to accept
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
+            "total": 1, "relationships": [{"entity": {"urn": urn}}]}}}}),
+    )
+    ok, detail = lineage_verified_upstream("http://gms", urn, "fct_payments")
+    assert not ok and "suspect asset itself" in detail
+
+    # a fully qualified reference name is taken verbatim
+    qualified = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+                 "other_db.billing,PROD)")
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
+            "total": 1,
+            "relationships": [{"entity": {"urn": qualified}}]}}}}),
+    )
+    ok, detail = lineage_verified_upstream("http://gms", urn, "other_db.billing")
+    assert ok, detail
+
+    # an unqualified suspect name gets no invented prefix
+    bare_urn = "urn:li:dataset:(urn:li:dataPlatform:duckdb,payments,PROD)"
+    bare_ref = "urn:li:dataset:(urn:li:dataPlatform:duckdb,billing,PROD)"
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
+            "total": 1,
+            "relationships": [{"entity": {"urn": bare_ref}}]}}}}),
+    )
+    ok, detail = lineage_verified_upstream("http://gms", bare_urn, "billing")
+    assert ok, detail
+
+
+def test_lineage_gate_pages_past_the_first_hundred(monkeypatch):
+    """PR #11 finding: a valid source on a later lineage page must be
+    found, not reported absent."""
+    import io
+    import json
+    import urllib.request
+
+    from notary.run import lineage_verified_upstream
+
+    urn = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+           "fiction_retail.fct_payments,PROD)")
+    billing = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+               "fiction_retail.billing_invoices,PROD)")
+
+    def _resp(payload):
+        class _R(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return _R(json.dumps(payload).encode())
+
+    def _paged(req, timeout=15):
+        body = json.loads(req.data)
+        start = body["variables"]["start"]
+        if start == 0:
+            rels = [{"entity": {"urn": f"urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.up{i},PROD)"}} for i in range(100)]
+        else:
+            rels = [{"entity": {"urn": billing}}]
+        return _resp({"data": {"dataset": {"lineage": {
+            "total": 101, "relationships": rels}}}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _paged)
+    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
+    assert ok, detail
+
+
+def test_recon_refusal_blocks_obsolete_incident_resolution():
+    """PR #11 adversarial finding: a run downgraded by a reconciliation
+    refusal must never clear a standing incident; the decision logic in
+    main() gates close_obsolete_incident on zero refusals. Locked here at
+    the source level to keep the contract visible."""
+    import inspect
+
+    from notary import run as run_mod
+
+    src = inspect.getsource(run_mod.main)
+    assert "elif recon_refusals:" in src
+    idx_refusal = src.index("elif recon_refusals:")
+    idx_close = src.index("close_obsolete_incident")
+    assert idx_refusal < idx_close
+
+
+def test_lineage_edges_group_by_downstream():
+    """PR #11 finding: the UpstreamLineage aspect replaces wholesale, so
+    all of a downstream's edges must travel in one emission."""
+    from notary.catalog import _grouped_lineage
+
+    grouped = _grouped_lineage((
+        ("billing", "payments"),
+        ("ledger", "payments"),
+        ("billing", "payments"),
+        ("payments", "reporting"),
+    ))
+    assert grouped == {
+        "payments": ["billing", "ledger"],
+        "reporting": ["payments"],
+    }

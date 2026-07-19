@@ -97,6 +97,20 @@ _DUCK_TO_SQL = {
 }
 
 
+def _grouped_lineage(
+    lineage: "tuple[tuple[str, str], ...]",
+) -> dict[str, list[str]]:
+    """{downstream: [upstreams...]} preserving declaration order; the
+    UpstreamLineage aspect replaces wholesale, so a downstream's edges
+    must travel in ONE emission."""
+    grouped: dict[str, list[str]] = {}
+    for upstream, downstream in lineage:
+        grouped.setdefault(downstream, [])
+        if upstream not in grouped[downstream]:
+            grouped[downstream].append(upstream)
+    return grouped
+
+
 def ingest_manifest(db_path: str | Path, manifest, gms_url: str) -> list[str]:
     """Register each warehouse table in DataHub with the manifest's catalog
     descriptions (lies and controls alike). Returns the dataset urns."""
@@ -146,13 +160,18 @@ def ingest_manifest(db_path: str | Path, manifest, gms_url: str) -> list[str]:
             from datahub.emitter.rest_emitter import DatahubRestEmitter
 
             emitter = DatahubRestEmitter(gms_server=gms_url)
-            for upstream, downstream in lineage:
+            # One MCE per downstream carrying ALL its upstreams: the
+            # UpstreamLineage aspect is a full replace, so per-edge
+            # emission would keep only the last edge (PR #11 finding).
+            for downstream, upstreams in _grouped_lineage(lineage).items():
                 emitter.emit(make_lineage_mce(
                     [make_dataset_urn(
-                        "duckdb", f"fiction_retail.{upstream}", "PROD")],
+                        "duckdb", f"fiction_retail.{u}", "PROD")
+                     for u in upstreams],
                     make_dataset_urn(
                         "duckdb", f"fiction_retail.{downstream}", "PROD"),
                 ))
+            emitter.flush()
         return urns
     finally:
         con.close()
