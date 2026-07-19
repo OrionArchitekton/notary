@@ -43,6 +43,13 @@ def _prop_urn(entry: dict) -> str:
             or entry.get("propertyUrn") or "")
 
 
+# The system prompt every S5 answer capture was made under. The replay-data
+# capture recomputes each S5 fixture's prompt key from THIS string plus the
+# record's stored user prompt to bind file content to filename (the same
+# rule ReplayLLM enforces for manifest fixtures).
+S5_SYSTEM = "You answer data questions grounded only on provided catalog context."
+
+
 def build_question(asset_urn: str) -> str:
     m = re.search(r",([^,]+),[A-Z]+\)$", asset_urn)
     name = m.group(1) if m else asset_urn
@@ -290,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         llm = ReplayLLM(args.fixtures)
 
-    system = "You answer data questions grounded only on provided catalog context."
+    system = S5_SYSTEM
     question = build_question(args.asset)
     before = llm.complete(
         system, build_prompt(canonical_context(strip_notary(asset)), question)

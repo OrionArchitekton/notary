@@ -193,6 +193,32 @@ def _entry_prompt_key(entry: CatalogEntry) -> str:
     )
 
 
+def missing_fixtures(fixtures: Path) -> list[str]:
+    """Manifest entries whose captured completion is absent from the store,
+    excluding the declared provider-blocked keys. Non-empty means the store
+    cannot represent a complete run; every consumer that replays the full
+    manifest (the eval CLI, the replay-data capture) must refuse to proceed
+    rather than score or publish a partial run."""
+    return [
+        f"{e.table}.{e.column or '(table)'}"
+        for e in MANIFEST.claims
+        if _entry_prompt_key(e) not in KNOWN_UNCAPTURABLE
+        and not (fixtures / f"{_entry_prompt_key(e)}.json").exists()
+    ]
+
+
+def unexpected_failures(report: EvalReport) -> list[str]:
+    """Entries whose extraction failed outside the declared provider-blocked
+    set (a fixture present but malformed, or drifted from its prompt).
+    Non-empty means the run is not a valid evaluation."""
+    return [
+        f"{r.entry.table}.{r.entry.column or '(table)'}"
+        for r in report.entries
+        if r.extraction_error
+        and _entry_prompt_key(r.entry) not in KNOWN_UNCAPTURABLE
+    ]
+
+
 def evaluate(
     manifest: Manifest,
     con: duckdb.DuckDBPyConnection,
@@ -264,12 +290,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    missing = [
-        f"{e.table}.{e.column or '(table)'}"
-        for e in MANIFEST.claims
-        if _entry_prompt_key(e) not in KNOWN_UNCAPTURABLE
-        and not (fixtures / f"{_entry_prompt_key(e)}.json").exists()
-    ]
+    missing = missing_fixtures(fixtures)
     if missing:
         print(
             f"error: fixtures store {fixtures} is missing captured "
@@ -291,15 +312,9 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         con.close()
     print(report.to_markdown())
-    unexpected = [
-        r for r in report.entries
-        if r.extraction_error
-        and _entry_prompt_key(r.entry) not in KNOWN_UNCAPTURABLE
-    ]
+    unexpected = unexpected_failures(report)
     if unexpected:
-        names = ", ".join(
-            f"{r.entry.table}.{r.entry.column or '(table)'}" for r in unexpected
-        )
+        names = ", ".join(unexpected)
         print(
             f"error: extraction failed unexpectedly for {names}; the table "
             f"above is disclosed but this run is not a valid evaluation",

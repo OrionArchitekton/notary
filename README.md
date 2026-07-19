@@ -22,6 +22,19 @@ it writes back what it learned, so the next agent inherits verified context:
 Built for the [DataHub Agent Hackathon](https://datahub.devpost.com) (Category 1:
 Agents That Do Real Work). Apache-2.0.
 
+## Hosted replay (no setup required)
+
+**https://notary-replay.vercel.app** replays a completed Notary run: the
+honest evaluation table, the flagship cents-lie catch with its evidence
+dossier, the before/after catalog descriptions, and the next-agent answer
+flip. The page discloses that every artifact shown is a real, frozen output
+captured from that run; nothing is generated when the page loads. Regenerate
+the data yourself with:
+
+```
+python scripts/capture_replay_data.py --out web/replay-data.json
+```
+
 ## Status
 
 Under construction (submission window: through 2026-08-10). The spec that governs
@@ -70,7 +83,74 @@ fail-closed and disclosed rather than silently dropped: the manifest carries
 5 truthful controls, and the table's controls column counts only the 4 that
 were actually adjudicated.
 
-## Planned quick start
+## Quick start (full local run)
 
-Full instructions land with the write-back demo: local DataHub quickstart,
-seeded demo warehouse with planted lies, one command to run Notary end to end.
+Prerequisites: Docker (for the DataHub quickstart), Python 3.11+, and
+[uv](https://docs.astral.sh/uv/) or pip. No API key is needed: extraction
+replays the captured completions by default (pass `--live` with an
+`ANTHROPIC_API_KEY` for fresh extraction).
+
+1. Start DataHub OSS locally (GMS answers on http://localhost:8080):
+
+   ```
+   pip install acryl-datahub && datahub docker quickstart
+   ```
+
+2. Install Notary (from a clone of this repo):
+
+   ```
+   uv venv && uv pip install -e '.[dev]'   # or: pip install -e '.[dev]'
+   ```
+
+3. Seed the demo: build the lying warehouse and register its catalog in
+   DataHub (planted descriptions, trust-ledger structured properties, and
+   the usage evidence the incident gate rests on):
+
+   ```
+   .venv/bin/python - <<'PY'
+   from pathlib import Path
+   from notary.catalog import ensure_trust_properties, ingest_manifest, seed_usage_stats
+   from notary.demo.seeder import DEFAULT_SEED, build_warehouse
+
+   gms = "http://localhost:8080"
+   db = Path(".notary/fiction_retail.duckdb")
+   db.parent.mkdir(parents=True, exist_ok=True)
+   manifest = build_warehouse(db, seed=DEFAULT_SEED)
+   ensure_trust_properties(gms)
+   ingest_manifest(db, manifest, gms)
+   seed_usage_stats(
+       gms,
+       "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)",
+       anchor_date="2026-07-18",
+   )
+   PY
+   ```
+
+4. Notarize the flagship asset. This probes the warehouse, adjudicates the
+   claims, and writes the trust ledger, evidence dossier, corrected
+   description, and (because the asset is high-usage) the incident back to
+   DataHub:
+
+   ```
+   NOTARY_RUN_DATE=2026-07-18 .venv/bin/python -m notary.run \
+     --asset 'urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)' \
+     --demo --db .notary/run-wh.duckdb
+   ```
+
+   Open the dataset in the DataHub UI (http://localhost:9002) to see what
+   it wrote. `--demo` builds its own copy of the seeded warehouse and
+   requires an absent `--db` path; `NOTARY_RUN_DATE` is required because
+   Notary never reads the wall clock.
+
+5. Watch the next agent flip (the S5 scenario): a stock catalog-grounded
+   agent reads the same asset through the DataHub MCP server, once with
+   the trust ledger withheld and once with it included:
+
+   ```
+   .venv/bin/python scripts/s5_next_agent.py
+   ```
+
+The evaluation table needs no DataHub at all (see Honest evaluation above),
+and `python scripts/capture_replay_data.py --out web/replay-data.json`
+regenerates the hosted replay's frozen payload, refusing to publish a
+partial or stale run.
