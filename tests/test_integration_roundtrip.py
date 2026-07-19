@@ -518,6 +518,21 @@ def test_rollback_removes_all_notary_state(ingested, tmp_path):
     # ledger gone
     props = _read_structured_properties(GMS, PAYMENTS_URN)
     assert not any(u.startswith("urn:li:structuredProperty:notary.") for u in props)
+    # every live Notary dossier for the asset is gone, including any from
+    # earlier runs whose ledger pointers were overwritten (search-based
+    # discovery); the document index is eventually consistent, so poll.
+    import time as _time
+
+    from notary.rollback import _search_notary_documents
+
+    remaining = None
+    deadline2 = _time.time() + 30
+    while _time.time() < deadline2:
+        remaining = _search_notary_documents(GMS, PAYMENTS_URN)
+        if not remaining:
+            break
+        _time.sleep(2)
+    assert remaining == [], f"live Notary dossiers survived: {remaining[:5]}"
     # description restored to the pre-image
     assert (
         read_descriptions(GMS, PAYMENTS_URN).get("amount")

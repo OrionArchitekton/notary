@@ -988,6 +988,44 @@ def test_partial_key_coverage_does_not_corroborate(tmp_path):
     assert finding.verdict is Verdict.UNVERIFIABLE
 
 
+def test_null_reference_totals_do_not_corroborate(tmp_path):
+    """Pipeline finding (PR #10 cycle 2): SQL AVG ignores NULLs, so a NULL
+    reference total must count as a NON-corroborating row (0.0), never
+    vanish from the ratio; one unexplained key breaks corroboration."""
+    from notary.types import Reconciliation
+
+    db = tmp_path / "nullref.duckdb"
+    con0 = duckdb.connect(str(db))
+    con0.execute("create table charges (id int, amount bigint)")
+    con0.execute(
+        "insert into charges select i, 1000 + i * 100 from range(150) t(i)"
+    )
+    con0.execute("create table billing_ref (id int, total_usd double)")
+    con0.execute(
+        "insert into billing_ref "
+        "select i, case when i = 0 then null else (1000 + i * 100) / 100.0 "
+        "end from range(150) t(i)"
+    )
+    con0.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.charges,PROD)",
+            field_path="amount", claim_type=ClaimType.UNIT_SCALE,
+            text="Charge amount in USD.", predicate={"unit": "USD"},
+        )
+        recon = Reconciliation(
+            table="billing_ref", suspect_key="id",
+            reference_key="id", reference_column="total_usd",
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, reconciliation=recon), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
 def test_reconcile_flag_parses_into_reconciliations():
     """Pipeline finding (PR #10): real (non-demo) runs need a way to declare
     the reconciliation source the corroborated rubric requires."""

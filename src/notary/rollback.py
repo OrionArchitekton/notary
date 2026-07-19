@@ -13,6 +13,7 @@ import argparse
 import json
 import re
 import sys
+import time
 import urllib.request
 
 from notary.catalog import (
@@ -62,14 +63,40 @@ def original_description_from_correction(text: str) -> str | None:
 
 
 def dossier_is_notary_authored(info: dict, asset_urn: str) -> bool:
-    """A dossier is deletable only when its own catalog metadata proves
-    Notary authored it FOR this asset: the Notary evidence title marker
-    AND the rolled-back asset among its related assets. A urn in the
-    ledger's evidence property is a pointer, not proof (PR #10 finding);
-    fail closed on either check."""
+    """A dossier is deletable only when its own catalog metadata attests
+    Notary authored it FOR this asset: the Notary evidence title marker,
+    the rolled-back asset among its related assets, AND the body wearing
+    Notary's machine format (the dossier header and the written-by
+    footer). A urn in the ledger's evidence property is a pointer, not
+    proof, and a title alone is user-controlled (PR #10 findings); fail
+    closed on every check. This attestation is format-borne, not
+    cryptographic (OSS documents carry no immutable creator identity);
+    deletion stays recoverable because it is a soft-delete."""
     title = info.get("title") or ""
     related = info.get("relatedAssets") or []
-    return title.startswith("Notary evidence: ") and asset_urn in related
+    contents = info.get("contents") or ""
+    return (
+        title.startswith("Notary evidence: ")
+        and asset_urn in related
+        and contents.startswith("# Notary evidence dossier")
+        and "Written by Notary (the context lie detector)." in contents
+    )
+
+
+def drain_corrections(text: str) -> str | None:
+    """The original description underneath one or more stacked Notary
+    corrections (repeated runs can layer them), or None when the text is
+    not a Notary correction at all. Each layer must match the full
+    correction format; the first non-matching layer is the restore
+    target."""
+    original = original_description_from_correction(text)
+    if original is None:
+        return None
+    while True:
+        deeper = original_description_from_correction(original)
+        if deeper is None:
+            return original
+        original = deeper
 
 
 def _graphql(gms_url: str, query: str, variables: dict) -> dict:
@@ -134,12 +161,12 @@ def _restore_description(
 
 
 def _document_info(gms_url: str, doc_urn: str) -> dict:
-    """Title + related-asset urns for a document, normalized for
-    dossier_is_notary_authored."""
+    """Title, related-asset urns, and contents for a document, normalized
+    for dossier_is_notary_authored."""
     data = _graphql(
         gms_url,
         "query($urn: String!) { document(urn: $urn) { info {"
-        " title relatedAssets { asset { urn } } } } }",
+        " title contents { text } relatedAssets { asset { urn } } } } }",
         {"urn": doc_urn},
     )
     info = ((data.get("document") or {}).get("info") or {})
@@ -147,19 +174,62 @@ def _document_info(gms_url: str, doc_urn: str) -> dict:
         ((r or {}).get("asset") or {}).get("urn", "")
         for r in (info.get("relatedAssets") or [])
     ]
+    contents = info.get("contents")
+    if isinstance(contents, dict):
+        contents = contents.get("text") or ""
     return {
         "title": info.get("title") or "",
         "relatedAssets": [u for u in related if u],
+        "contents": contents or "",
     }
 
 
+def _search_notary_documents(gms_url: str, asset_urn: str) -> list[str]:
+    """Urns of live documents related to the asset whose title carries the
+    Notary evidence marker, discovered via document search (paginated,
+    bounded). The ledger's pointers alone are incomplete: a later run
+    overwrites the evidence property, orphaning earlier dossiers (PR #10
+    finding); search recovers them. Every candidate is still individually
+    verified before deletion."""
+    urns: list[str] = []
+    start, page = 0, 100
+    for _ in range(20):  # bound: at most 2000 candidates per rollback
+        data = _graphql(
+            gms_url,
+            "query($input: SearchDocumentsInput!) {"
+            " searchDocuments(input: $input) {"
+            " total documents { urn info { title } } } }",
+            {"input": {"query": "Notary evidence",
+                       "relatedAssets": [asset_urn],
+                       "start": start, "count": page}},
+        )
+        result = (data.get("searchDocuments") or {})
+        docs = result.get("documents") or []
+        for d in docs:
+            title = ((d or {}).get("info") or {}).get("title") or ""
+            urn = (d or {}).get("urn") or ""
+            if urn and title.startswith("Notary evidence: "):
+                urns.append(urn)
+        start += len(docs)
+        if not docs or start >= int(result.get("total") or 0):
+            break
+    return urns
+
+
 def _soft_delete(gms_url: str, urns: list[str]) -> None:
-    _graphql(
+    data = _graphql(
         gms_url,
         "mutation($input: BatchUpdateSoftDeletedInput!) "
         "{ batchUpdateSoftDeleted(input: $input) }",
         {"input": {"urns": urns, "deleted": True}},
     )
+    # A valid response carrying false is a FAILED delete (PR #10 finding:
+    # recording it as deleted orphans the surviving documents).
+    if data.get("batchUpdateSoftDeleted") is not True:
+        raise RuntimeError(
+            f"batchUpdateSoftDeleted returned "
+            f"{data.get('batchUpdateSoftDeleted')!r} for {len(urns)} urns"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -193,11 +263,13 @@ def main(argv: list[str] | None = None) -> int:
     dossiers = dossier_urns_from_evidence(notary_props.get(TRUST_EVIDENCE_URN, ""))
 
     # Descriptions: restore any field whose CURRENT text matches Notary's
-    # own correction format; everything else is left untouched.
+    # own correction format, draining stacked corrections down to the
+    # original human text (repeated runs can layer them, PR #10 finding);
+    # everything else is left untouched.
     restored, refused = [], []
     try:
         for field, text in read_descriptions(args.gms, args.asset).items():
-            original = original_description_from_correction(text or "")
+            original = drain_corrections(text or "")
             if original is None:
                 continue
             try:
@@ -212,17 +284,29 @@ def main(argv: list[str] | None = None) -> int:
     receipt["legs"]["descriptions"] = {"restored": restored, "failed": refused}
 
     # Incident: resolve EVERY open Notary incident for the asset. The
-    # finder returns one at a time, and duplicates can accumulate when a
-    # raise races the eventually-consistent incident index; a bounded loop
-    # with a seen-set drains them without spinning on a stale index entry.
+    # incident index is eventually consistent, so a single empty read is
+    # not proof of none (an incident the run just raised can surface
+    # seconds later) and a just-resolved incident can linger as a stale
+    # entry; a bounded drain requires two consecutive empty reads before
+    # declaring the leg done.
     resolved_incidents: list[str] = []
     try:
-        for _ in range(10):
+        empty_reads = 0
+        for _ in range(20):
             incident = find_open_notary_incident(
                 args.gms, args.asset, incident_title(args.asset)
             )
-            if incident is None or incident in resolved_incidents:
-                break
+            if incident is None:
+                empty_reads += 1
+                if empty_reads >= 2:
+                    break
+                time.sleep(3)
+                continue
+            empty_reads = 0
+            if incident in resolved_incidents:
+                # stale index entry for an incident this run resolved
+                time.sleep(2)
+                continue
             resolve_incident(args.gms, incident, note="Rolled back by Notary")
             resolved_incidents.append(incident)
         receipt["legs"]["incident"] = {"resolved": resolved_incidents or None}
@@ -230,11 +314,21 @@ def main(argv: list[str] | None = None) -> int:
         receipt["legs"]["incident"] = {"error": str(e)[:200]}
         failed = True
 
-    # Dossier documents: verify each urn the ledger names is a Notary
-    # dossier for THIS asset before soft-deleting it (the evidence value
-    # is a pointer, not proof of authorship), then delete the verified set.
+    # Dossier documents: the ledger's pointers UNION search discovery (a
+    # later run overwrites the evidence property, orphaning earlier
+    # dossiers). Verify each candidate is a Notary dossier for THIS asset
+    # before soft-deleting it (a pointer or a title is not proof of
+    # authorship), then delete the verified set.
+    try:
+        discovered = _search_notary_documents(args.gms, args.asset)
+    except Exception as e:
+        discovered = []
+        receipt["legs"]["dossier_discovery"] = {"error": str(e)[:200]}
+        failed = True
+    candidates = list(dict.fromkeys(dossiers + discovered))
+    ledger_set = set(dossiers)
     verified_docs, refused_docs = [], []
-    for doc_urn in dossiers:
+    for doc_urn in candidates:
         try:
             info = _document_info(args.gms, doc_urn)
         except Exception as e:
@@ -243,9 +337,15 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if dossier_is_notary_authored(info, args.asset):
             verified_docs.append(doc_urn)
-        else:
+        elif doc_urn in ledger_set:
+            # The LEDGER claimed this urn as Notary evidence and it is
+            # not: an anomaly the operator must see; fail the leg.
             refused_docs.append(f"{doc_urn}: not a Notary dossier for this asset")
             failed = True
+        else:
+            # Search over-approximates by design; refusing a non-Notary
+            # match is the fail-closed filter working, not a failure.
+            refused_docs.append(f"{doc_urn}: search candidate refused")
     try:
         if verified_docs:
             _soft_delete(args.gms, verified_docs)
