@@ -25,7 +25,7 @@ from notary.catalog import (
     ingest_manifest,
     read_descriptions,
 )
-from notary.demo.seeder import DEFAULT_SEED, build_warehouse
+from notary.demo.seeder import DEFAULT_SEED, MANIFEST, build_warehouse
 from notary.extract import ReplayLLM, extract_claims
 from notary.probe import plan_probe, run_probe
 from notary.adjudicate import adjudicate
@@ -110,7 +110,10 @@ def test_s1_round_trip_writes_verdict_back(ingested, monkeypatch):
     )
     con = duckdb.connect(str(db), read_only=True)
     try:
-        finding = adjudicate(claims[0], run_probe(plan_probe(claims[0]), con))
+        finding = adjudicate(claims[0], run_probe(plan_probe(
+                claims[0],
+                reconciliation=MANIFEST.reconciliations[("fct_payments", "amount")],
+            ), con))
     finally:
         con.close()
     assert finding.verdict is Verdict.CONTRADICTED
@@ -171,7 +174,12 @@ def test_incident_raise_and_resolve_round_trip(ingested, tmp_path):
             ReplayLLM("tests/fixtures/llm"),
         )
         findings = [
-            adjudicate(c, run_probe(plan_probe(c), con)) for c in claims
+            adjudicate(c, run_probe(plan_probe(
+                c,
+                reconciliation=MANIFEST.reconciliations.get(
+                    ("fct_payments", c.field_path)
+                ),
+            ), con)) for c in claims
         ]
     finally:
         con.close()
@@ -271,7 +279,12 @@ def test_obsolete_incident_is_resolved_by_a_clean_run(ingested):
             ReplayLLM("tests/fixtures/llm"),
         )
         findings = [
-            adjudicate(c, run_probe(plan_probe(c), con)) for c in claims
+            adjudicate(c, run_probe(plan_probe(
+                c,
+                reconciliation=MANIFEST.reconciliations.get(
+                    ("fct_payments", c.field_path)
+                ),
+            ), con)) for c in claims
         ]
     finally:
         con.close()
