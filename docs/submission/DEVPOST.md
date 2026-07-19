@@ -138,4 +138,4 @@ python, duckdb, datahub, mcp, anthropic-claude, playwright, vercel
 
 ## Video demo link
 
-VIDEO_URL_PLACEHOLDER (YouTube; filled at submission time)
+https://youtu.be/eMN0t10ZndM
