@@ -397,3 +397,70 @@ def test_run_cli_table_level_deprecation_end_to_end(ingested, tmp_path):
     assert "Notary" in desc
     # restore the planted lie for the next run
     _reset_table_description(legacy, lie)
+
+
+def test_s5_next_agent_inherits_the_verdict(ingested, tmp_path):
+    """S5 acceptance: a SECOND agent session reading the asset through the
+    STOCK MCP read tools (no Notary code in the reader path) retrieves the
+    trust ledger and evidence dossier and changes its answer: the
+    pre-Notary view repeats the catalog lie; the ledger view refuses it
+    and quotes the verified measurement. Answers replay captured
+    completions (disclosed in the fixtures' provenance metadata)."""
+    import os
+    import subprocess
+    import sys
+
+    # ensure this run's write-back state exists (reset lie, notarize)
+    _reset_editable_description(
+        PAYMENTS_URN, "amount", "Transaction amount in USD."
+    )
+    env = {**os.environ, "NOTARY_RUN_DATE": "2026-07-18"}
+    root = str(__import__("pathlib").Path(__file__).parent.parent)
+    r = subprocess.run(
+        [
+            sys.executable, "-m", "notary.run",
+            "--gms", GMS,
+            "--db", str(tmp_path / "s5wh.duckdb"),
+            "--fixtures", "tests/fixtures/llm",
+            "--asset", PAYMENTS_URN,
+            "--demo",
+        ],
+        capture_output=True, text=True, timeout=300, env=env, cwd=root,
+    )
+    assert r.returncode == 0, r.stderr
+
+    s5 = subprocess.run(
+        [sys.executable, "scripts/s5_next_agent.py", "--gms", GMS],
+        capture_output=True, text=True, timeout=300, env=env, cwd=root,
+    )
+    assert s5.returncode == 0, s5.stderr
+    out = s5.stdout
+    view1 = out.split("view 2")[0]
+    view2 = out.split("view 2")[1]
+    # pre-Notary view: reports the catalog's USD description and, having no
+    # ledger, must carry NO contradiction verdict and NO measured evidence
+    assert "USD" in view1
+    assert "cents" not in view1.lower()
+    assert "contradicted" not in view1.lower()
+    assert "12795" not in view1
+    # ledger view: refuses the claim and quotes the verified measurement
+    assert "contradicted" in view2.lower()
+    assert "cents" in view2.lower()
+    assert "12795" in view2  # the measured median, not a fabrication
+
+    # clean up the incident this notarize raised; the cleanup itself is
+    # asserted so an expired poll cannot silently leak an ACTIVE incident
+    from notary.incidents import close_obsolete_incident, incident_title, find_open_notary_incident
+    import time
+    found = None
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        found = find_open_notary_incident(
+            GMS, PAYMENTS_URN, incident_title(PAYMENTS_URN)
+        )
+        if found:
+            break
+        time.sleep(1)
+    assert found, "raised incident never became query-visible for cleanup"
+    resolved = close_obsolete_incident(GMS, PAYMENTS_URN, run_date="2026-07-18")
+    assert resolved == found
