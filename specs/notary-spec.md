@@ -131,9 +131,13 @@ README and demo.
   asset (title marker, related asset, and Notary's machine content format);
   the attestation is format-borne, not cryptographic (OSS documents carry no
   immutable creator identity), and deletion is a recoverable soft-delete.
-  Known residual: a human edit made INSIDE a correction block is overwritten
+  Known residuals: a human edit made INSIDE a correction block is overwritten
   by the restore (the quoted pre-image wins); the refusal boundary is the
-  block, not characters within it.
+  block, not characters within it. And the write path reads the pre-image
+  moments before replacing the description without compare-and-swap (the
+  catalog API offers none), so a human edit landing inside that window is
+  superseded by the correction and its restore returns the pre-window text;
+  the correction's provenance label and reversibility bound the damage.
 - **Safety**: Notary edits only metadata surfaces, never warehouse data. Probes
   are read-only SQL with bounded scan cost.
 - **No Cloud dependency**: every surface used exists in DataHub OSS quickstart.

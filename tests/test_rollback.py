@@ -216,6 +216,29 @@ def test_soft_delete_false_result_raises(monkeypatch):
         rb._soft_delete("http://gms", ["urn:li:document:x1"])
 
 
+def test_truncated_document_search_raises_instead_of_partial_success(monkeypatch):
+    """Pipeline finding (PR #10 cycle 3): exhausting the page bound with
+    results remaining must FAIL discovery, never return a prefix the
+    caller would treat as complete (delete it, drop the ledger, exit 0)."""
+    import notary.rollback as rb
+
+    def _page(gms, query, variables):
+        start = variables["input"]["start"]
+        return {"searchDocuments": {
+            "total": 5000,
+            "documents": [
+                {"urn": f"urn:li:document:d{start + i}",
+                 "info": {"title": "Notary evidence: fct_payments.amount (2026-07-18)"}}
+                for i in range(variables["input"]["count"])
+            ],
+        }}
+
+    monkeypatch.setattr(rb, "_graphql", _page)
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="truncated"):
+        rb._search_notary_documents("http://gms", _ASSET)
+
+
 def test_stacked_corrections_drain_to_the_original():
     """Pipeline finding (PR #10 cycle 2): repeated runs can stack
     corrections; the drain restores the ORIGINAL human description, one

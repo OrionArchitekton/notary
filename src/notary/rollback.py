@@ -192,7 +192,7 @@ def _search_notary_documents(gms_url: str, asset_urn: str) -> list[str]:
     finding); search recovers them. Every candidate is still individually
     verified before deletion."""
     urns: list[str] = []
-    start, page = 0, 100
+    start, page, total = 0, 100, 0
     for _ in range(20):  # bound: at most 2000 candidates per rollback
         data = _graphql(
             gms_url,
@@ -211,9 +211,18 @@ def _search_notary_documents(gms_url: str, asset_urn: str) -> list[str]:
             if urn and title.startswith("Notary evidence: "):
                 urns.append(urn)
         start += len(docs)
-        if not docs or start >= int(result.get("total") or 0):
-            break
-    return urns
+        total = int(result.get("total") or 0)
+        if not docs or start >= total:
+            return urns
+    # The page bound was exhausted with results remaining. Returning the
+    # prefix would let the caller delete it, remove the ledger, and report
+    # success while authored state survives (PR #10 cycle-3 finding);
+    # discovery must fail so the rollback exits nonzero and retains the
+    # ledger for a retry.
+    raise RuntimeError(
+        f"document search truncated at {start} of {total} results; "
+        f"re-run rollback to continue"
+    )
 
 
 def _soft_delete(gms_url: str, urns: list[str]) -> None:

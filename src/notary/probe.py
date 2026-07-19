@@ -67,7 +67,11 @@ def plan_probe(
             # Bounded join of the suspect prefix against the declared
             # reference prefix: per-key ratio suspect/reference. A true
             # cents-as-dollars load sits at exactly 100x the major-unit
-            # reference; the tolerance absorbs float representation only.
+            # reference; the tolerance absorbs IEEE 754 representation
+            # noise ONLY (measured ulp-scale, <= 2e-14 on the demo
+            # warehouse). A wider band would let a systematic business
+            # discrepancy, e.g. a 0.5% settlement fee, corroborate a
+            # false contradiction (PR #10 cycle-3 finding).
             # Key-shape measurements travel with the join (PR #10 finding:
             # joined ROWS alone can be inflated by duplicate keys or
             # fan-out, and say nothing about unmatched suspect keys); the
@@ -81,7 +85,7 @@ def plan_probe(
                 f'avg(case when r."{reconciliation.reference_column}" is null '
                 f'then 0.0 when r."{reconciliation.reference_column}" = 0 '
                 f'then 0.0 when abs(s.v / r."{reconciliation.reference_column}" '
-                f'- 100.0) <= 0.5 then 1.0 else 0.0 end) as recon_ratio_share '
+                f'- 100.0) <= 1e-6 then 1.0 else 0.0 end) as recon_ratio_share '
                 f'from suspect s '
                 f'join (select "{reconciliation.reference_key}" as rk, '
                 f'"{reconciliation.reference_column}" from '
