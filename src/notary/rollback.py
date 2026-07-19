@@ -27,9 +27,15 @@ from notary.incidents import (
     resolve_incident,
 )
 
+# Full-format match (never a prefix): appended or altered text after a
+# Notary correction is FOREIGN state and refuses the whole field. The
+# greedy pre-image group binds to the OUTER format boundary, so a
+# correction applied over an older correction restores the full inner
+# text instead of truncating at the first quote (PR #10 findings).
 _CORRECTION_RE = re.compile(
-    r'^\[Contradicted by Notary \d{4}-\d{2}-\d{2}\] The prior description '
-    r'said "(.+?)", but the stored values are inconsistent with it \(',
+    r'\[Contradicted by Notary \d{4}-\d{2}-\d{2}\] The prior description '
+    r'said "(.+)", but the stored values are inconsistent with it \(.+\)\. '
+    r'See the Notary evidence dossier before trusting either statement\.',
     re.DOTALL,
 )
 
@@ -49,10 +55,21 @@ def dossier_urns_from_evidence(value: str) -> list[str]:
 
 def original_description_from_correction(text: str) -> str | None:
     """The pre-image quoted inside Notary's own correction format, or None
-    when the text does not match that exact format (foreign or hand-edited
-    descriptions are never touched)."""
-    m = _CORRECTION_RE.match(text)
+    when the text is not EXACTLY that format end to end (foreign,
+    hand-edited, or appended-to descriptions are never touched)."""
+    m = _CORRECTION_RE.fullmatch(text)
     return m.group(1) if m else None
+
+
+def dossier_is_notary_authored(info: dict, asset_urn: str) -> bool:
+    """A dossier is deletable only when its own catalog metadata proves
+    Notary authored it FOR this asset: the Notary evidence title marker
+    AND the rolled-back asset among its related assets. A urn in the
+    ledger's evidence property is a pointer, not proof (PR #10 finding);
+    fail closed on either check."""
+    title = info.get("title") or ""
+    related = info.get("relatedAssets") or []
+    return title.startswith("Notary evidence: ") and asset_urn in related
 
 
 def _graphql(gms_url: str, query: str, variables: dict) -> dict:
@@ -116,6 +133,26 @@ def _restore_description(
     )
 
 
+def _document_info(gms_url: str, doc_urn: str) -> dict:
+    """Title + related-asset urns for a document, normalized for
+    dossier_is_notary_authored."""
+    data = _graphql(
+        gms_url,
+        "query($urn: String!) { document(urn: $urn) { info {"
+        " title relatedAssets { asset { urn } } } } }",
+        {"urn": doc_urn},
+    )
+    info = ((data.get("document") or {}).get("info") or {})
+    related = [
+        ((r or {}).get("asset") or {}).get("urn", "")
+        for r in (info.get("relatedAssets") or [])
+    ]
+    return {
+        "title": info.get("title") or "",
+        "relatedAssets": [u for u in related if u],
+    }
+
+
 def _soft_delete(gms_url: str, urns: list[str]) -> None:
     _graphql(
         gms_url,
@@ -174,38 +211,71 @@ def main(argv: list[str] | None = None) -> int:
         failed = True
     receipt["legs"]["descriptions"] = {"restored": restored, "failed": refused}
 
-    # Incident: resolve the open Notary incident, if any.
+    # Incident: resolve EVERY open Notary incident for the asset. The
+    # finder returns one at a time, and duplicates can accumulate when a
+    # raise races the eventually-consistent incident index; a bounded loop
+    # with a seen-set drains them without spinning on a stale index entry.
+    resolved_incidents: list[str] = []
     try:
-        incident = find_open_notary_incident(
-            args.gms, args.asset, incident_title(args.asset)
-        )
-        if incident:
+        for _ in range(10):
+            incident = find_open_notary_incident(
+                args.gms, args.asset, incident_title(args.asset)
+            )
+            if incident is None or incident in resolved_incidents:
+                break
             resolve_incident(args.gms, incident, note="Rolled back by Notary")
-        receipt["legs"]["incident"] = {"resolved": incident or None}
+            resolved_incidents.append(incident)
+        receipt["legs"]["incident"] = {"resolved": resolved_incidents or None}
     except Exception as e:
         receipt["legs"]["incident"] = {"error": str(e)[:200]}
         failed = True
 
-    # Dossier documents: soft-delete the ones the ledger names.
+    # Dossier documents: verify each urn the ledger names is a Notary
+    # dossier for THIS asset before soft-deleting it (the evidence value
+    # is a pointer, not proof of authorship), then delete the verified set.
+    verified_docs, refused_docs = [], []
+    for doc_urn in dossiers:
+        try:
+            info = _document_info(args.gms, doc_urn)
+        except Exception as e:
+            refused_docs.append(f"{doc_urn}: read failed: {str(e)[:120]}")
+            failed = True
+            continue
+        if dossier_is_notary_authored(info, args.asset):
+            verified_docs.append(doc_urn)
+        else:
+            refused_docs.append(f"{doc_urn}: not a Notary dossier for this asset")
+            failed = True
     try:
-        if dossiers:
-            _soft_delete(args.gms, dossiers)
-        receipt["legs"]["dossiers"] = {"deleted": dossiers}
+        if verified_docs:
+            _soft_delete(args.gms, verified_docs)
+        receipt["legs"]["dossiers"] = {
+            "deleted": verified_docs, "refused": refused_docs,
+        }
     except Exception as e:
-        receipt["legs"]["dossiers"] = {"error": str(e)[:200]}
+        receipt["legs"]["dossiers"] = {
+            "error": str(e)[:200], "refused": refused_docs,
+        }
         failed = True
 
-    # Ledger last, so a failed earlier leg leaves the evidence pointers in
-    # place for a retry.
-    try:
-        if notary_props:
-            _remove_structured_properties(
-                args.gms, args.asset, sorted(notary_props)
-            )
-        receipt["legs"]["ledger"] = {"removed": sorted(notary_props)}
-    except Exception as e:
-        receipt["legs"]["ledger"] = {"error": str(e)[:200]}
-        failed = True
+    # Ledger last, and ONLY when every earlier leg succeeded: it carries
+    # the dossier pointers a retry needs (PR #10 finding: removing it
+    # after a failed leg orphans the surviving documents).
+    if failed:
+        receipt["legs"]["ledger"] = {
+            "removed": [],
+            "skipped": "earlier leg failed; ledger retained for retry",
+        }
+    else:
+        try:
+            if notary_props:
+                _remove_structured_properties(
+                    args.gms, args.asset, sorted(notary_props)
+                )
+            receipt["legs"]["ledger"] = {"removed": sorted(notary_props)}
+        except Exception as e:
+            receipt["legs"]["ledger"] = {"error": str(e)[:200]}
+            failed = True
 
     print(json.dumps(receipt, indent=1))
     return 1 if failed else 0

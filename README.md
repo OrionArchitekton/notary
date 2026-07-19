@@ -191,7 +191,8 @@ never touching descriptions Notary did not author).
 - **Wire**: a warehouse connection (DuckDB today; the probe layer is plain
   bounded SQL), `--gms` for your DataHub, `TOOLS_IS_MUTATION_ENABLED` for
   the MCP write-back, `NOTARY_RUN_DATE` from your scheduler, and a declared
-  reconciliation source per money column (where your trusted totals live).
+  reconciliation source per money column (where your trusted totals live:
+  `--reconcile amount=billing_totals:order_id:order_id:total_usd`, repeatable).
 - **Safety**: probes are read-only with capped scans; universal claims get
   verdicts only from complete scans; contradictions require corroboration;
   every mutation is provenance-labeled and reversible via rollback.

@@ -523,10 +523,21 @@ def test_rollback_removes_all_notary_state(ingested, tmp_path):
         read_descriptions(GMS, PAYMENTS_URN).get("amount")
         == "Transaction amount in USD."
     )
-    # no open Notary incident
-    assert find_open_notary_incident(
-        GMS, PAYMENTS_URN, incident_title(PAYMENTS_URN)
-    ) is None
+    # no open Notary incident. The incident search index is eventually
+    # consistent, so the just-resolved incident can appear open for a few
+    # seconds; poll briefly before concluding the resolve failed.
+    import time
+
+    open_incident = "unchecked"
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        open_incident = find_open_notary_incident(
+            GMS, PAYMENTS_URN, incident_title(PAYMENTS_URN)
+        )
+        if open_incident is None:
+            break
+        time.sleep(1)
+    assert open_incident is None
 
     # leave the demo state present for reviewers
     r2 = _run_cli(

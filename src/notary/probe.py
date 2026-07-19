@@ -68,26 +68,39 @@ def plan_probe(
             # reference prefix: per-key ratio suspect/reference. A true
             # cents-as-dollars load sits at exactly 100x the major-unit
             # reference; the tolerance absorbs float representation only.
+            # Key-shape measurements travel with the join (PR #10 finding:
+            # joined ROWS alone can be inflated by duplicate keys or
+            # fan-out, and say nothing about unmatched suspect keys); the
+            # rubric requires distinct matched keys covering every suspect
+            # key, uniquely, before corroboration counts.
             recon_join = (
+                f', suspect as (select "{reconciliation.suspect_key}" as k, '
+                f'"{col}" as v from "{table}" limit {SCAN_LIMIT})'
                 f', recon as (select count(*) as recon_joined, '
+                f'count(distinct s.k) as recon_matched_keys, '
                 f'avg(case when r."{reconciliation.reference_column}" = 0 '
                 f'then 0.0 when abs(s.v / r."{reconciliation.reference_column}" '
                 f'- 100.0) <= 0.5 then 1.0 else 0.0 end) as recon_ratio_share '
-                f'from (select "{reconciliation.suspect_key}" as k, "{col}" as v '
-                f'from "{table}" limit {SCAN_LIMIT}) s '
+                f'from suspect s '
                 f'join (select "{reconciliation.reference_key}" as rk, '
                 f'"{reconciliation.reference_column}" from '
                 f'"{reconciliation.table}" limit {SCAN_LIMIT}) r on s.k = r.rk '
-                f'where s.v is not null) '
+                f'where s.v is not null)'
+                f', recon_suspect as (select count(distinct k) as '
+                f'recon_suspect_keys, count(*) as recon_suspect_rows '
+                f'from suspect where v is not null) '
             )
             recon_select = (
-                ", recon.recon_joined, recon.recon_ratio_share, "
+                ", recon.recon_joined, recon.recon_matched_keys, "
+                "recon.recon_ratio_share, recon_suspect.recon_suspect_keys, "
+                "recon_suspect.recon_suspect_rows, "
                 f"(select count(*) from (select 1 from "
                 f'"{reconciliation.table}" limit {SCAN_LIMIT})) '
                 "as recon_reference_rows_scanned"
             )
             recon_keys = (
-                "recon_joined", "recon_ratio_share",
+                "recon_joined", "recon_matched_keys", "recon_ratio_share",
+                "recon_suspect_keys", "recon_suspect_rows",
                 "recon_reference_rows_scanned",
             )
         # LIMIT bounds the rows READ, so the null filter sits OUTSIDE the
@@ -114,7 +127,7 @@ def plan_probe(
             f'from (select "{col}" as v from "{table}" limit {SCAN_LIMIT}))'
             f'{recon_join} '
             f'select base.*{recon_select} from base'
-            f'{", recon" if reconciliation is not None else ""}'
+            f'{", recon, recon_suspect" if reconciliation is not None else ""}'
         )
         return ProbeSpec(
             claim=claim,

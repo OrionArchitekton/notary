@@ -279,7 +279,10 @@ class NotaryWriter:
                     tool_args = {
                         "entity_urn": asset_urn,
                         "operation": "replace",
-                        "description": _corrected_description(f, run_date),
+                        "description": _corrected_description(
+                            f, run_date,
+                            pre_image=pre_images.get(f.claim.field_path),
+                        ),
                     }
                     if f.claim.field_path:
                         tool_args["column_path"] = f.claim.field_path
@@ -399,10 +402,17 @@ def _dossier_markdown(finding, run_date: str, pre_image: str | None = None) -> s
     )
 
 
-def _corrected_description(finding, run_date: str) -> str:
+def _corrected_description(
+    finding, run_date: str, pre_image: str | None = None
+) -> str:
     """Evidence-grounded correction: state the measurements, never assert a
     unit as fact (review finding: the previous hardcoded 'integer cents'
-    text could write a fabrication under Notary authority)."""
+    text could write a fabrication under Notary authority). The quoted text
+    is the FULL prior description (the correction replaces the whole field,
+    and rollback restores exactly what is quoted; quoting only the one
+    extracted claim sentence would drop the rest on restore, PR #10
+    finding); the claim sentence is the fallback when no pre-image was
+    readable."""
     claim = finding.claim
     median = finding.evidence.get("median")
     integer_share = finding.evidence.get("integer_share")
@@ -411,9 +421,10 @@ def _corrected_description(finding, run_date: str) -> str:
         if median is not None and integer_share is not None
         else "measurements in the Notary evidence dossier"
     )
+    quoted = pre_image if pre_image is not None else claim.text
     return (
         f"[Contradicted by Notary {run_date}] The prior description said "
-        f'"{claim.text}", but the stored values are inconsistent with it '
+        f'"{quoted}", but the stored values are inconsistent with it '
         f"({measured}; {finding.rationale}). See the Notary evidence dossier "
         f"before trusting either statement."
     )

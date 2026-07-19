@@ -32,8 +32,9 @@ _RECON_JOIN_FLOOR = 100
 _RUBRIC_TEXT = (
     f"CONTRADICTED iff integer_share == {_CENTS_INTEGER_SHARE} and median > "
     f"{_CENTS_MEDIAN_FLOOR} AND a declared reconciliation corroborates "
-    f"(>= {_RECON_JOIN_FLOOR} joined keys, every ratio at 100x, reference "
-    f"scan complete); the distribution alone is suspicion and falls to "
+    f"(>= {_RECON_JOIN_FLOOR} DISTINCT matched keys covering EVERY suspect "
+    f"key, keys unique on both sides, every ratio at 100x, reference scan "
+    f"complete); the distribution alone is suspicion and falls to "
     f"UNVERIFIABLE. CONFIRMED iff fractional_share >= "
     f"{_DOLLARS_FRACTIONAL_FLOOR} and 0 < median <= {_DOLLARS_MEDIAN_CEILING} "
     f"(fractional values are impossible under integer-cents storage, so the "
@@ -214,11 +215,26 @@ def _adjudicate_unit_scale(claim: Claim, result: ProbeResult) -> Finding:
         recon_share = float(m.get("recon_ratio_share") or 0.0)
         ref_scanned = int(m.get("recon_reference_rows_scanned") or 0)
         scan_limit_val = int(m.get("scan_limit") or 0)
+        matched_keys = int(m.get("recon_matched_keys") or 0)
+        suspect_keys = int(m.get("recon_suspect_keys") or 0)
+        suspect_rows = int(m.get("recon_suspect_rows") or 0)
         evidence["recon_joined"] = int(recon_joined)
+        evidence["recon_matched_keys"] = matched_keys
+        evidence["recon_suspect_keys"] = suspect_keys
+        evidence["recon_suspect_rows"] = suspect_rows
         evidence["recon_ratio_share"] = recon_share
         evidence["recon_reference_rows_scanned"] = ref_scanned
+        # Corroboration is key-shaped, not row-shaped (PR #10 finding):
+        # distinct matched keys clear the floor, every suspect key is
+        # matched (full coverage), keys are unique on both sides (joined
+        # rows == matched keys == suspect rows rules out fan-out and
+        # duplicate suspect keys), every per-row ratio sits at 100x, and
+        # the reference scan is complete.
         if (
-            int(recon_joined) >= _RECON_JOIN_FLOOR
+            matched_keys >= _RECON_JOIN_FLOOR
+            and matched_keys == suspect_keys
+            and suspect_rows == suspect_keys
+            and int(recon_joined) == matched_keys
             and recon_share == 1.0
             and 0 < ref_scanned < scan_limit_val
         ):
@@ -238,9 +254,10 @@ def _adjudicate_unit_scale(claim: Claim, result: ProbeResult) -> Finding:
             rationale=(
                 f"every value is an integer with median {median:.0f}, "
                 f"consistent with integer cents, but the declared "
-                f"reconciliation did not corroborate a 100x scale "
-                f"(joined={int(recon_joined)}, ratio_share={recon_share:.2f}); "
-                f"refusing to guess"
+                f"reconciliation did not corroborate a 100x scale on every "
+                f"suspect key (matched_keys={matched_keys}, "
+                f"suspect_keys={suspect_keys}, joined={int(recon_joined)}, "
+                f"ratio_share={recon_share:.2f}); refusing to guess"
             ),
         )
     if (
