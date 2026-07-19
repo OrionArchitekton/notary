@@ -23,7 +23,7 @@ import duckdb  # noqa: E402
 
 from notary.catalog import _corrected_description, _dossier_markdown  # noqa: E402
 from notary.demo.seeder import ANCHOR_DATE, DEFAULT_SEED, MANIFEST, build_warehouse  # noqa: E402
-from notary.eval import evaluate  # noqa: E402
+from notary.eval import evaluate, missing_fixtures, unexpected_failures  # noqa: E402
 from notary.extract import ReplayLLM  # noqa: E402
 
 PAYMENTS_TABLE = "fct_payments"
@@ -61,6 +61,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixtures", default="tests/fixtures/llm")
     args = parser.parse_args(argv)
 
+    # Same fail-closed gates as notary.eval.main (pipeline finding: without
+    # them, a missing or corrupt fixture still exits 0 and publishes a
+    # partial evaluation as the frozen complete replay). Both run BEFORE any
+    # output file is written.
+    fixtures = Path(args.fixtures)
+    missing = missing_fixtures(fixtures)
+    if missing:
+        print(
+            f"error: fixtures store {fixtures} is missing captured "
+            f"completions for: {', '.join(missing)}; refusing to publish a "
+            f"partial run as the frozen replay",
+            file=sys.stderr,
+        )
+        return 2
+
     db = Path(args.db)
     db.parent.mkdir(parents=True, exist_ok=True)
     build_warehouse(db, seed=DEFAULT_SEED)
@@ -71,6 +86,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     finally:
         con.close()
+
+    unexpected = unexpected_failures(report)
+    if unexpected:
+        print(
+            f"error: extraction failed unexpectedly for "
+            f"{', '.join(unexpected)}; refusing to publish a partial run as "
+            f"the frozen replay",
+            file=sys.stderr,
+        )
+        return 3
 
     payments = {
         e.column: e for e in MANIFEST.claims if e.table == PAYMENTS_TABLE
