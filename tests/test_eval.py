@@ -57,6 +57,8 @@ _PREDICATES = {
     ("fct_sessions_daily", None): {"cadence": "daily"},
     ("stg_inventory", None): {"cadence": "hourly"},
     ("legacy_orders_v1", None): {"deprecated": True},
+    ("billing_invoices", "total_major"): {"unit": "major_currency_units"},
+    ("stg_service_fees", "fee_usd"): {"unit": "USD"},
 }
 
 _BY_KEY = {(e.table, e.column): e for e in MANIFEST.claims}
@@ -94,7 +96,7 @@ def test_eval_scores_manifest_against_ground_truth(warehouse):
 
     totals = report.totals()
     assert totals["lies"] == 12
-    assert totals["controls"] == 5
+    assert totals["controls"] == 7
     assert totals["caught"] + totals["missed"] == totals["lies"]
     assert totals["false_positives"] + totals["clean"] == totals["controls"]
 
@@ -162,7 +164,7 @@ def test_extraction_failure_is_isolated_and_reported(warehouse):
     assert not blocked.findings
     totals = report.totals()
     assert totals["unscored"] == 1
-    assert totals["controls"] == 4  # scored controls only
+    assert totals["controls"] == 6  # scored controls only
     assert "unscored" in report.to_markdown().lower()
 
     # neighbours in the same table are unaffected (email's completeness lie

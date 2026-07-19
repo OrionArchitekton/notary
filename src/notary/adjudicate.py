@@ -152,7 +152,11 @@ def _adjudicate_unit_scale(claim: Claim, result: ProbeResult) -> Finding:
     m = result.measurements
     if unit == "PERCENT_0_100" and m:
         return _adjudicate_percent(claim, result)
-    if unit != "USD" or not m:
+    # The money rubric applies to any MAJOR-UNIT claim, not only the USD
+    # spelling: cent fractions are impossible under integer minor-unit
+    # storage in every currency (judge-slice v3: the canonical billing
+    # ledger claims "major currency units").
+    if unit not in ("USD", "MAJOR_CURRENCY_UNITS") or not m:
         return _unverifiable_no_rubric(claim, result)
 
     row_count = m.get("row_count") or 0

@@ -76,6 +76,60 @@ def receipt_ok(receipt: dict) -> bool:
     return True
 
 
+def lineage_verified_upstream(
+    gms_url: str, asset_urn: str, reference_table: str
+) -> tuple[bool, str]:
+    """A declared reconciliation source earns trust only when the catalog
+    itself records it as an UPSTREAM of the suspect asset (judge-slice
+    v3): an arbitrary or self-referential table name must not corroborate
+    a contradiction. Fail-closed: any query error or an absent edge
+    refuses."""
+    import json as _json
+    import re as _re
+    import urllib.request as _request
+
+    m = _re.match(
+        r"urn:li:dataset:\(urn:li:dataPlatform:([^,]+),([^,]+),([A-Z]+)\)$",
+        asset_urn,
+    )
+    if not m:
+        return False, f"refused: cannot parse asset urn {asset_urn!r}"
+    platform, name, env = m.groups()
+    prefix = name.rsplit(".", 1)[0]
+    ref_urn = (
+        f"urn:li:dataset:(urn:li:dataPlatform:{platform},"
+        f"{prefix}.{reference_table},{env})"
+    )
+    query = (
+        "query($urn:String!){ dataset(urn:$urn){ lineage(input:{"
+        "direction:UPSTREAM,start:0,count:100}){ relationships{"
+        " entity{ urn } } } } }"
+    )
+    payload = _json.dumps(
+        {"query": query, "variables": {"urn": asset_urn}}
+    ).encode()
+    req = _request.Request(
+        f"{gms_url}/api/graphql", data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with _request.urlopen(req, timeout=15) as resp:
+            out = _json.loads(resp.read())
+        if out.get("errors"):
+            return False, f"refused: lineage query errors {str(out['errors'])[:120]}"
+        rels = ((((out.get("data") or {}).get("dataset") or {})
+                 .get("lineage") or {}).get("relationships") or [])
+        upstreams = {((r or {}).get("entity") or {}).get("urn") for r in rels}
+    except Exception as e:
+        return False, f"refused: lineage query failed ({str(e)[:120]})"
+    if ref_urn in upstreams:
+        return True, f"lineage-verified upstream: {ref_urn}"
+    return False, (
+        f"refused: {reference_table} is not a catalog-verified upstream "
+        f"of the asset"
+    )
+
+
 def parse_reconcile_args(items: list[str]) -> dict:
     """Parse repeatable --reconcile declarations
     (FIELD=TABLE:SUSPECT_KEY:REFERENCE_KEY:REFERENCE_COLUMN) into
@@ -282,18 +336,30 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Reconciliation sources are operator-declared; demo mode carries
         # the manifest's declarations, real runs the --reconcile flags.
-        # Without one, a unit distribution can only ever reach
+        # A declaration only counts once the catalog verifies the source
+        # is a lineage upstream of the suspect (judge-slice v3); without
+        # a verified one, a unit distribution can only ever reach
         # UNVERIFIABLE (rubric v2, judge-review P0).
         table = _urn_table(args.asset)
-        findings = [
-            adjudicate(claim, run_probe(plan_probe(
-                claim, as_of=run_date,
-                reconciliation=MANIFEST.reconciliations.get(
-                    (table, claim.field_path)
-                ) if args.demo else reconcile_map.get(claim.field_path),
-            ), con))
-            for claim in claims
-        ]
+        findings = []
+        for claim in claims:
+            recon = (
+                MANIFEST.reconciliations.get((table, claim.field_path))
+                if args.demo else reconcile_map.get(claim.field_path)
+            )
+            if recon is not None:
+                ok, detail = lineage_verified_upstream(
+                    args.gms, args.asset, recon.table
+                )
+                print(
+                    f"[reconciliation] {claim.field_path or '(table)'}: "
+                    f"{detail}"
+                )
+                if not ok:
+                    recon = None
+            findings.append(adjudicate(claim, run_probe(plan_probe(
+                claim, as_of=run_date, reconciliation=recon,
+            ), con)))
     finally:
         con.close()
 

@@ -133,6 +133,26 @@ def ingest_manifest(db_path: str | Path, manifest, gms_url: str) -> list[str]:
             )
             client.entities.upsert(dataset)
             urns.append(str(dataset.urn))
+        # Dataset lineage (judge-slice v3): the catalog records that the
+        # suspect warehouse table DERIVES from its reconciliation source,
+        # so the corroboration gate can verify the declared reference is
+        # a real upstream, not an arbitrary table name.
+        lineage = getattr(manifest, "lineage", ()) or ()
+        if lineage:
+            from datahub.emitter.mce_builder import (
+                make_dataset_urn,
+                make_lineage_mce,
+            )
+            from datahub.emitter.rest_emitter import DatahubRestEmitter
+
+            emitter = DatahubRestEmitter(gms_server=gms_url)
+            for upstream, downstream in lineage:
+                emitter.emit(make_lineage_mce(
+                    [make_dataset_urn(
+                        "duckdb", f"fiction_retail.{upstream}", "PROD")],
+                    make_dataset_urn(
+                        "duckdb", f"fiction_retail.{downstream}", "PROD"),
+                ))
         return urns
     finally:
         con.close()

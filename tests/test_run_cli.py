@@ -173,3 +173,54 @@ def test_schema_fingerprint_match_is_pure_and_strict():
     )
     # no cataloged fields = nothing to bind on: fail closed
     assert not schema_matches(catalog_fields=[], warehouse_columns=["a"])
+
+
+def test_lineage_gate_refuses_without_upstream_edge(monkeypatch):
+    """Judge-slice v3: a declared reconciliation source corroborates only
+    when the catalog records it as a lineage UPSTREAM of the suspect;
+    absence and query failure both refuse (fail-closed)."""
+    import io
+    import json
+    import urllib.request
+
+    from notary.run import lineage_verified_upstream
+
+    urn = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+           "fiction_retail.fct_payments,PROD)")
+    billing = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+               "fiction_retail.billing_invoices,PROD)")
+
+    def _resp(payload):
+        class _R(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return _R(json.dumps(payload).encode())
+
+    # edge present -> verified
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
+            "relationships": [{"entity": {"urn": billing}}]}}}}),
+    )
+    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
+    assert ok and "lineage-verified" in detail
+
+    # edge absent -> refused
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
+            "relationships": []}}}}),
+    )
+    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
+    assert not ok and "refused" in detail
+
+    # query failure -> refused, never assumed
+    def _boom(req, timeout=15):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
+    assert not ok and "refused" in detail

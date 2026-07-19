@@ -141,6 +141,27 @@ def test_normalized_percent_unit_survives_entailment_gate():
     assert claims[0].predicate["unit"] == "percent_0_100"
 
 
+def test_normalized_major_units_token_survives_entailment_gate():
+    """Judge-slice v3: the billing control's captured completion normalizes
+    "major currency units" to major_currency_units, which never occurs
+    verbatim in prose; the gate must map it to its stated surface form or
+    the control is silently unscorable."""
+    canned = (
+        '[{"claim_type": "unit_scale", '
+        '"text": "Canonical invoice total in major currency units from '
+        'the billing system.", '
+        '"predicate": {"unit": "major_currency_units"}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.billing_invoices,PROD)",
+        descriptions={"total_major": "Canonical invoice total in major "
+                      "currency units from the billing system."},
+        llm=_CannedLLM(canned),
+    )
+    assert len(claims) == 1
+    assert claims[0].predicate["unit"] == "major_currency_units"
+
+
 def test_percent_unit_without_stated_range_is_dropped():
     """Pipeline regression (P2 thread PRRT..2Q): percent_0_100 encodes BOTH
     the unit and the 0-to-100 range. A description that says percent but not

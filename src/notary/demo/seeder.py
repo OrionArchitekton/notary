@@ -48,6 +48,10 @@ class Manifest:
     reconciliations: "dict[tuple[str, str], Reconciliation]" = field(
         default_factory=dict
     )
+    # (upstream_table, downstream_table) pairs registered as dataset
+    # lineage in DataHub: the catalog-native record that the suspect was
+    # derived from its reconciliation source (judge-slice v3).
+    lineage: tuple[tuple[str, str], ...] = ()
 
     def to_json(self) -> str:
         rows = []
@@ -140,38 +144,50 @@ ENTRIES: tuple[CatalogEntry, ...] = (
                  True, ClaimType.DOMAIN_ENUM,
                  "contains negative oversell values",
                  planted_text="Non-negative."),
+    # v3 scored adversary controls (judge slice): the cents signature
+    # alone must never contradict, and a declared reconciliation earns
+    # nothing unless it corroborates.
+    CatalogEntry("billing_invoices", "total_major",
+                 "Canonical invoice total in major currency units from "
+                 "the billing system.",
+                 False, ClaimType.UNIT_SCALE,
+                 "major units with cent fractions; the canonical source "
+                 "fct_payments derives from"),
+    CatalogEntry("stg_service_fees", "fee_usd",
+                 "Service fee amount in USD.",
+                 False, ClaimType.UNIT_SCALE,
+                 "legitimate whole-dollar fees; matches the cents "
+                 "signature by distribution and must never be "
+                 "contradicted"),
 )
 
 MANIFEST = Manifest(
     claims=ENTRIES,
     reconciliations={
         ("fct_payments", "amount"): Reconciliation(
-            table="stg_billing_totals",
+            table="billing_invoices",
             suspect_key="order_id",
             reference_key="order_id",
-            reference_column="total_usd",
+            reference_column="total_major",
+        ),
+        # Adversary control: a self-referential declaration (the suspect
+        # named as its own reference). The per-key ratio sits at 1x, not
+        # 100x, so corroboration fails and the verdict stays
+        # UNVERIFIABLE; in the live path the lineage gate additionally
+        # refuses a source that is not a verified upstream.
+        ("stg_service_fees", "fee_usd"): Reconciliation(
+            table="stg_service_fees",
+            suspect_key="fee_id",
+            reference_key="fee_id",
+            reference_column="fee_usd",
         ),
     },
+    lineage=(("billing_invoices", "fct_payments"),),
 )
 
 # frozen "today" so freshness lies are stable relative to generated data;
 # the demo narrative treats this as the run date.
 ANCHOR_DATE = "2026-07-18"
-
-
-def _seed_billing_totals(con: duckdb.DuckDBPyConnection) -> None:
-    """The billing system's dollar-denominated export: the independent
-    reconciliation source the unit rubric corroborates against. In the
-    fiction, billing and the warehouse ingested the SAME underlying
-    payments; billing kept dollars while the warehouse load dropped the
-    /100, so per-order totals sit at exactly 100x. Derived from the
-    already-seeded payments rows with NO rng draws, so adding this table
-    cannot shift any other table's data (seeder-invariance gate)."""
-    con.execute(
-        "create table stg_billing_totals as "
-        "select order_id, amount / 100.0 as total_usd "
-        "from fct_payments"
-    )
 
 
 def build_warehouse(db_path: str | Path, seed: int = DEFAULT_SEED) -> Manifest:
@@ -195,7 +211,7 @@ def build_warehouse(db_path: str | Path, seed: int = DEFAULT_SEED) -> Manifest:
         _seed_sessions(con, rng)
         _seed_legacy_orders(con, rng)
         _seed_inventory(con, rng)
-        _seed_billing_totals(con)
+        _seed_service_fees(con, rng)
         con.execute("commit")
     except BaseException:
         con.close()
@@ -268,16 +284,35 @@ def _seed_orders(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:
 
 
 def _seed_payments(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:
+    """The CANONICAL billing ledger is seeded first, in major currency
+    units (cent fractions and all); the warehouse payments table is then
+    DERIVED from it by the buggy load that multiplies into minor units
+    while the catalog description keeps claiming USD dollars (the S1
+    lie). This is the honest fiction judges asked for: the
+    reconciliation reference is the source, the suspect is the derived
+    copy, and DataHub carries that lineage. The RNG draw sequence is
+    IDENTICAL to the original seeder (one randrange + one choice per
+    row), so the derived fct_payments bytes are frozen (see
+    test_legacy_tables_are_byte_frozen: the recorded demo narrates its
+    median)."""
     currencies = ["USD"] * 80 + ["EUR"] * 15 + ["GBP"] * 5
     rows = []
     for i in range(1, 2001):
-        cents = rng.randrange(499, 24999)  # integer cents: the S1 lie
-        rows.append((i, i, cents, rng.choice(currencies)))
+        cents = rng.randrange(499, 24999)  # drawn as minor units
+        rows.append((i, i, cents / 100.0, rng.choice(currencies)))
     con.execute(
-        "create table fct_payments (payment_id int, order_id int, "
-        "amount bigint, currency varchar)"
+        "create table billing_invoices (invoice_id int, order_id int, "
+        "total_major double, currency varchar)"
     )
-    _bulk_insert(con, "fct_payments", rows)
+    _bulk_insert(con, "billing_invoices", rows)
+    # The buggy warehouse load: exact 100x into a column still described
+    # as USD dollars. round() makes the cents round-trip exact.
+    con.execute(
+        "create table fct_payments as "
+        "select invoice_id as payment_id, order_id, "
+        "cast(round(total_major * 100) as bigint) as amount, currency "
+        "from billing_invoices"
+    )
 
 
 def _seed_refunds(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:
@@ -335,6 +370,23 @@ def _seed_legacy_orders(con: duckdb.DuckDBPyConnection, rng: random.Random) -> N
         "query_user varchar)"
     )
     _bulk_insert(con, "query_log", log_rows)
+
+
+def _seed_service_fees(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:
+    """Whole-dollar adversary control (judge-slice v3): legitimate fees
+    stored in whole USD dollars. All-integer with a high median, so the
+    distribution matches the cents signature exactly; the scored
+    expectation is that Notary states suspicion and refuses, never
+    contradicts. Draws happen AFTER every pre-existing table's draws, so
+    the frozen legacy bytes cannot shift (seeder-invariance gate)."""
+    rows = []
+    for i in range(1, 201):
+        rows.append((i, rng.randrange(1, 2001), rng.randrange(15, 43) * 100))
+    con.execute(
+        "create table stg_service_fees "
+        "(fee_id int, order_id int, fee_usd bigint)"
+    )
+    _bulk_insert(con, "stg_service_fees", rows)
 
 
 def _seed_inventory(con: duckdb.DuckDBPyConnection, rng: random.Random) -> None:

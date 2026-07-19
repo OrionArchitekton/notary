@@ -109,6 +109,17 @@ README and demo.
 - **Honesty**: every surfaced number comes from a real run; frozen demo artifacts
   are real captured outputs, disclosed as such. UNVERIFIABLE is a first-class
   verdict, never hidden.
+- **Corroborated contradiction**: a unit-scale contradiction is never issued
+  from distribution alone. It requires an operator-declared reconciliation
+  source measuring the claimed scale relationship on every suspect key over
+  complete scans, and in the live path the catalog itself must record that
+  source as a lineage upstream of the suspect asset (a self-referential or
+  arbitrary table name is refused, fail-closed). The scored evaluation
+  carries adversary controls proving the refusals: a legitimate whole-dollar
+  column matching the cents signature stays uncontradicted, and a declared
+  reconciliation that fails to corroborate earns nothing. The offline
+  evaluation exercises the rubric with declared sources; lineage
+  verification binds at the catalog-connected boundary.
 - **Determinism**: probes are pure SQL and adjudication is a pure rubric, so
   the same warehouse state and the same extracted claims yield the same
   verdicts. The LLM boundary is deterministic where stability matters: tests

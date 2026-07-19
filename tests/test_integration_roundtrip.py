@@ -153,6 +153,25 @@ def test_s1_round_trip_writes_verdict_back(ingested, monkeypatch):
     assert "Notary" in desc_text and "cents" in desc_text
 
 
+def test_lineage_registers_billing_as_upstream_of_payments(ingested):
+    """Judge-slice v3: the catalog itself records that the suspect
+    payments table derives from the canonical billing ledger, and the
+    reconciliation gate verifies exactly that edge."""
+    from notary.run import lineage_verified_upstream
+
+    ok, detail = lineage_verified_upstream(
+        GMS, PAYMENTS_URN, "billing_invoices"
+    )
+    assert ok, detail
+    assert "billing_invoices" in detail
+    # a self-referential or unrelated source is refused by the same gate
+    ok2, detail2 = lineage_verified_upstream(
+        GMS, PAYMENTS_URN, "stg_service_fees"
+    )
+    assert not ok2
+    assert "refused" in detail2
+
+
 def test_incident_raise_and_resolve_round_trip(ingested, tmp_path):
     """S4 tracer: a CONTRADICTED unit lie on a HIGH-USAGE asset (usage
     seeded into the live catalog, fetched back as evidence) raises a REAL

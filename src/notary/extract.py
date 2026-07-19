@@ -192,6 +192,7 @@ def _grounded(item: dict, description: str) -> bool:
 # its own verbatim occurrence, so the anti-hallucination property is kept.
 _UNIT_SURFACE_FORMS: dict[str, tuple[str, ...]] = {
     "percent_0_100": ("percent", "%"),
+    "major_currency_units": ("major currency units",),
 }
 
 # percent_0_100 encodes a RANGE as well as a unit (pipeline finding: the
