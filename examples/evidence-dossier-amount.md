@@ -1,0 +1,39 @@
+# Notary evidence dossier
+
+- Asset: urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)
+- Field: amount
+- Claim (unit_scale): "Transaction amount in USD."
+- Verdict: CONTRADICTED
+- Run date: 2026-07-18
+- Rationale: described as USD but every value is an integer with median 12795; consistent with integer cents, not dollars
+
+## Description pre-image (before any Notary correction)
+
+Transaction amount in USD.
+
+## Probe SQL
+
+```sql
+with base as (select median(v) as median, avg(case when v is null then null when v = floor(v) then 1.0 else 0.0 end) as integer_share, avg(case when v is null then null when v * 100 = floor(v * 100) then 1.0 else 0.0 end) as centi_integer_share, min(v) as min, max(v) as max, count(v) as row_count, count(*) as rows_scanned, 100000 as scan_limit from (select "amount" as v from "fct_payments" limit 100000)), recon as (select count(*) as recon_joined, avg(case when r."total_usd" = 0 then 0.0 when abs(s.v / r."total_usd" - 100.0) <= 0.5 then 1.0 else 0.0 end) as recon_ratio_share from (select "order_id" as k, "amount" as v from "fct_payments" limit 100000) s join (select "order_id" as rk, "total_usd" from "stg_billing_totals" limit 100000) r on s.k = r.rk where s.v is not null)  select base.*, recon.recon_joined, recon.recon_ratio_share, (select count(*) from (select 1 from "stg_billing_totals" limit 100000)) as recon_reference_rows_scanned from base, recon
+```
+
+## Measurements
+
+```json
+{
+ "unit_claimed": "USD",
+ "median": 12795.0,
+ "integer_share": 1.0,
+ "min": 511.0,
+ "max": 24952.0,
+ "row_count": 2000,
+ "probe_sql": "with base as (select median(v) as median, avg(case when v is null then null when v = floor(v) then 1.0 else 0.0 end) as integer_share, avg(case when v is null then null when v * 100 = floor(v * 100) then 1.0 else 0.0 end) as centi_integer_share, min(v) as min, max(v) as max, count(v) as row_count, count(*) as rows_scanned, 100000 as scan_limit from (select \"amount\" as v from \"fct_payments\" limit 100000)), recon as (select count(*) as recon_joined, avg(case when r.\"total_usd\" = 0 then 0.0 when abs(s.v / r.\"total_usd\" - 100.0) <= 0.5 then 1.0 else 0.0 end) as recon_ratio_share from (select \"order_id\" as k, \"amount\" as v from \"fct_payments\" limit 100000) s join (select \"order_id\" as rk, \"total_usd\" from \"stg_billing_totals\" limit 100000) r on s.k = r.rk where s.v is not null)  select base.*, recon.recon_joined, recon.recon_ratio_share, (select count(*) from (select 1 from \"stg_billing_totals\" limit 100000)) as recon_reference_rows_scanned from base, recon",
+ "rubric": "CONTRADICTED iff integer_share == 1.0 and median > 1000 AND a declared reconciliation corroborates (>= 100 joined keys, every ratio at 100x, reference scan complete); the distribution alone is suspicion and falls to UNVERIFIABLE. CONFIRMED iff fractional_share >= 0.3 and 0 < median <= 1000 (fractional values are impossible under integer-cents storage, so the dollars confirmation is earned by distribution); otherwise UNVERIFIABLE; every verdict requires a complete scan (under the scan limit)",
+ "recon_joined": 2000,
+ "recon_ratio_share": 1.0,
+ "recon_reference_rows_scanned": 2000
+}
+```
+
+Written by Notary (the context lie detector). This dossier is machine-generated evidence; the next agent reading this asset inherits it.
+

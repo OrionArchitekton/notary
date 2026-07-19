@@ -24,6 +24,16 @@ so the next agent inherits verified context:
 Built for the [DataHub Agent Hackathon](https://datahub.devpost.com) (Category 1:
 Agents That Do Real Work). Apache-2.0.
 
+## Try it in 60 seconds
+
+1. Open **https://notary-replay.vercel.app**: the frozen, reproducible
+   replay of the recorded run, disclosed on-page.
+2. Expand the flagship evidence dossier: the probe SQL, the measurements,
+   and the reconciliation that earned the contradiction.
+3. Read the two captured agent answers side by side: the same catalog,
+   with and without Notary's trust ledger. (Frozen copies of all of these
+   also live in [examples/](examples/).)
+
 ## Hosted replay (no setup required)
 
 **https://notary-replay.vercel.app** replays the recorded demo run: the
@@ -71,24 +81,34 @@ uv venv && uv pip install -e '.[dev]'   # or: pip install -e '.[dev]'
 
 1 of 17 entries had no extraction (dim_customers.country_code); scored fail-closed: a lie counts as missed, a control is unscored and excluded from the controls and false-positive columns. Not verified.
 
-This table is published verbatim, misses included. Five deterministic rubrics
-run today: null-share (completeness), staleness against an explicit anchor
-date (freshness), distinct-set and bounds checks (domain_enum), recent query
-activity against the warehouse query log (deprecation), and the USD cents
-signature (unit_scale). Together they catch 9 of the 12 planted lies with
-zero false positives. The three unit misses are DECLARED, not pending: a
-0-to-1 distribution is scale-ambiguous (a stored fraction and legitimate
-sub-1-percent values are indistinguishable by distribution alone; our own
-review pipeline killed the fraction rubric we first shipped for exactly that
-reason), and milliseconds/grams magnitude bands would be domain guesses.
-This project does not guess. Each new rubric moves its
-row from missed to caught; the table is regenerated, never hand-edited (a
-test fails if the README table drifts from the command's output). The one
-unextracted entry is a provider-side content-filter block on that exact
-capture prompt (deterministic across three attempts); it is scored
-fail-closed and disclosed rather than silently dropped: the manifest carries
-5 truthful controls, and the table's controls column counts only the 4 that
-were actually adjudicated.
+This table is published verbatim, misses included: 9 of 12 planted lies
+caught, and 0 of the 4 adjudicated controls misclassified. Five
+deterministic rubrics run today: null-share (completeness), staleness
+against an explicit anchor date (freshness), distinct-set and bounds checks
+(domain_enum), recent query activity against the warehouse query log
+(deprecation), and the corroborated USD cents rubric (unit_scale).
+
+**Why we refuse to catch the other three.** Distribution-only evidence
+never contradicts here, by design. A 0-to-1 distribution is scale-ambiguous
+(a stored fraction and legitimate sub-1-percent values are indistinguishable
+by distribution alone; our own review pipeline killed the fraction rubric we
+first shipped for exactly that reason). All-integer values with a high
+median match the cents signature, but legitimate whole-dollar amounts match
+it too, so the flagship contradiction is only issued when an
+operator-declared reconciliation source (the billing system's
+dollar-denominated totals in the demo) corroborates the 100x scale on every
+joined key over complete scans; without one, Notary states its suspicion
+and returns UNVERIFIABLE. Milliseconds/grams magnitude bands would be
+domain guesses. This project does not guess: for a trust product, a wrong
+CONTRADICTED is worse than a declared miss.
+
+Each new rubric moves its row from missed to caught; the table is
+regenerated, never hand-edited (a test fails if the README table drifts
+from the command's output). The one unextracted entry is a provider-side
+content-filter block on that exact capture prompt (deterministic across
+three attempts); it is scored fail-closed and disclosed rather than
+silently dropped: the manifest carries 5 truthful controls, and the table's
+controls column counts only the 4 that were actually adjudicated.
 
 ## Quick start (full local run)
 
@@ -161,4 +181,33 @@ replays the captured completions by default (pass `--live` with an
 The evaluation table needs no DataHub at all (see Honest evaluation above),
 and `python scripts/capture_replay_data.py --out web/replay-data.json`
 regenerates the hosted replay's frozen payload, refusing to publish a
-partial or stale run.
+partial or stale run. Everything a run writes is reversible with one
+command: `python -m notary.rollback --asset <urn>` removes the ledger,
+dossiers, incident, and correction (restoring the quoted pre-image, and
+never touching descriptions Notary did not author).
+
+## How a platform team would adopt this
+
+- **Wire**: a warehouse connection (DuckDB today; the probe layer is plain
+  bounded SQL), `--gms` for your DataHub, `TOOLS_IS_MUTATION_ENABLED` for
+  the MCP write-back, `NOTARY_RUN_DATE` from your scheduler, and a declared
+  reconciliation source per money column (where your trusted totals live).
+- **Safety**: probes are read-only with capped scans; universal claims get
+  verdicts only from complete scans; contradictions require corroboration;
+  every mutation is provenance-labeled and reversible via rollback.
+- **Rollout**: start with unit_scale and completeness on your highest-usage
+  tables; keep incidents behind the usage gate; review CONTRADICTED
+  verdicts before trusting them blind, exactly as the corrected
+  descriptions themselves advise.
+- **Non-goals today**: lineage-derived claims, ownership checks, non-SQL
+  stores, and cross-warehouse reconciliation discovery.
+
+## Open-source contributions
+
+Built during the hackathon and fed back upstream: issue
+[mcp-server-datahub#139](https://github.com/acryldata/mcp-server-datahub/issues/139)
+(grep_documents silently collapses missing, empty, and non-matching
+documents, which blocks fail-closed agent callers) and PR
+[mcp-server-datahub#140](https://github.com/acryldata/mcp-server-datahub/pull/140)
+implementing the omitted-accounting fix with tests, plus a triage of the
+stale issue #41 with release-level evidence.
