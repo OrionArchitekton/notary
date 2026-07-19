@@ -35,6 +35,14 @@ _TRUST_PROP_PREFIX = "urn:li:structuredProperty:notary."
 _ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 
 
+def _prop_urn(entry: dict) -> str:
+    """Structured-property urn across payload shape variants (cycle-3
+    finding: matching one shape while another exists lets the alternate
+    silently bypass a pass)."""
+    return ((entry.get("structuredProperty") or {}).get("urn")
+            or entry.get("propertyUrn") or "")
+
+
 def build_question(asset_urn: str) -> str:
     m = re.search(r",([^,]+),[A-Z]+\)$", asset_urn)
     name = m.group(1) if m else asset_urn
@@ -90,17 +98,27 @@ def canonical_context(asset: dict) -> str:
     return _ISO_DATE_RE.sub("<run-date>", "\n".join(lines))
 
 
-def assemble_dossier_lines(gdata: dict) -> list[str]:
+def assemble_dossier_lines(gdata: dict, expected_urns: list[str]) -> list[str]:
     """Pure, fail-closed assembly of dossier evidence lines.
 
     The ledger NAMED dossiers, so empty grep results (deleted or unreadable
-    documents) or a record missing any of Field/Verdict/Rationale raise
-    instead of letting the caller answer from a bare verdict (PR6 finding)."""
+    documents), a record missing any of Field/Verdict/Rationale, or a named
+    dossier absent from the results (cycle-3 finding: the tool omits
+    documents with no matches) raise instead of letting the caller answer
+    from partial evidence."""
     results = gdata.get("results") or []
     if not results:
         raise RuntimeError(
             "the trust ledger names evidence dossiers but none were "
             "retrievable; refusing to answer from a bare verdict"
+        )
+    returned = {r.get("urn") or "" for r in results}
+    missing_docs = sorted(set(expected_urns) - returned)
+    if missing_docs:
+        raise RuntimeError(
+            f"named dossier(s) absent from retrieval: "
+            f"{', '.join(missing_docs)}; refusing to answer from partial "
+            f"evidence"
         )
     findings: dict[str, dict[str, str]] = {}
     for result in results:
@@ -160,7 +178,7 @@ async def read_asset_via_mcp(gms_url: str, asset_urn: str) -> dict:
         for entry in (entity0.get("structuredProperties") or {}).get(
             "properties"
         ) or []:
-            urn = ((entry.get("structuredProperty") or {}).get("urn") or "")
+            urn = _prop_urn(entry)
             if not urn.endswith("notary.evidence"):
                 continue
             values = entry.get("values") or []
@@ -181,7 +199,7 @@ async def read_asset_via_mcp(gms_url: str, asset_urn: str) -> dict:
                     f"dossier retrieval failed: {g.content}"
                 )
             gdata = json.loads(g.content[0].text)
-            dossier_lines = assemble_dossier_lines(gdata)
+            dossier_lines = assemble_dossier_lines(gdata, doc_urns)
 
     entity = data[0] if isinstance(data, list) and data else {}
     asset: dict = {"description": "", "field_descriptions": {}, "trust": {}}
@@ -197,8 +215,7 @@ async def read_asset_via_mcp(gms_url: str, asset_urn: str) -> dict:
             corrected[f.get("fieldPath", "")] = edited
     sp = entity.get("structuredProperties") or {}
     for entry in sp.get("properties") or []:
-        urn = ((entry.get("structuredProperty") or {}).get("urn")
-               or entry.get("propertyUrn") or "")
+        urn = _prop_urn(entry)
         values = entry.get("values") or []
         first = values[0] if values else {}
         value = (
@@ -212,6 +229,14 @@ async def read_asset_via_mcp(gms_url: str, asset_urn: str) -> dict:
         asset["trust"]["corrected"] = corrected
     if dossier_lines:
         asset["trust"]["dossier_findings"] = dossier_lines
+    if asset["trust"].get("verdict") and not dossier_lines:
+        # cycle-3 fail-closed guard: a ledger verdict with no retrievable
+        # evidence (missing property, malformed value, or shape skew) must
+        # never reach the answer boundary as a bare verdict
+        raise RuntimeError(
+            "trust ledger verdict present but no evidence dossiers were "
+            "retrieved; refusing to answer from a bare verdict"
+        )
     return asset
 
 

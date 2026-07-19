@@ -118,15 +118,19 @@ def test_incomplete_dossier_evidence_raises():
 
     complete = {"results": [{"urn": "d1", "matches": [{"excerpt":
         "- Field: amount\n- Verdict: CONTRADICTED\n- Rationale: measured"}]}]}
-    assert assemble_dossier_lines(complete) == [
+    assert assemble_dossier_lines(complete, ["d1"]) == [
         "field=amount; verdict=CONTRADICTED; rationale=measured"
     ]
     with pytest.raises(RuntimeError):
-        assemble_dossier_lines({"results": []})  # dossiers named, none found
+        assemble_dossier_lines({"results": []}, ["d1"])  # named, none found
     partial = {"results": [{"urn": "d1", "matches": [{"excerpt":
         "- Field: amount\n- Verdict: CONTRADICTED"}]}]}
     with pytest.raises(RuntimeError):
-        assemble_dossier_lines(partial)  # rationale missing
+        assemble_dossier_lines(partial, ["d1"])  # rationale missing
+    with pytest.raises(RuntimeError):
+        # cycle-3 regression: a named dossier ABSENT from the grep results
+        # (deleted or unmatched) is incomplete coverage, never silent
+        assemble_dossier_lines(complete, ["d1", "d2"])
 
 
 def test_multiple_corrected_fields_keep_their_identity():
