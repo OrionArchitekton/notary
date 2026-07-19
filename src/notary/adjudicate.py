@@ -51,12 +51,93 @@ def adjudicate(claim: Claim, result: ProbeResult) -> Finding:
         return _adjudicate_freshness(claim, result)
     if claim.claim_type is ClaimType.DOMAIN_ENUM:
         return _adjudicate_domain_enum(claim, result)
+    if claim.claim_type is ClaimType.DEPRECATION_USAGE:
+        return _adjudicate_deprecation(claim, result)
     return _unverifiable_no_rubric(claim, result)
+
+
+# Percent (0-100 scale) rubric. PR5 review adjudication: stored-as-fraction
+# vs rounded sub-1-percent TRUE percentages is scale-invariant (any 0-1
+# distribution has a legitimate tiny-percent reading), so a
+# distribution-only rubric must NEVER contradict; a [0, 1]-confined
+# distribution falls to UNVERIFIABLE with the ambiguity stated. Only
+# confirmation is reachable, from values that actually use the percent
+# scale.
+_PERCENT_RUBRIC_TEXT = (
+    "CONFIRMED iff 0 <= min, median > 1, and max <= 100 over a complete "
+    "scan (under the scan limit); a [0, 1]-confined distribution is "
+    "scale-ambiguous (fraction vs sub-1-percent values) and falls to "
+    "UNVERIFIABLE; contradiction is unreachable by design"
+)
+
+
+def _adjudicate_percent(claim: Claim, result: ProbeResult) -> Finding:
+    m = result.measurements
+    row_count = m.get("row_count") or 0
+    if not row_count or m.get("median") is None or m.get("integer_share") is None:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence={"row_count": int(row_count), "probe_sql": result.spec.sql},
+            rationale="no non-null values to measure; refusing to guess",
+        )
+    centi_share = m.get("centi_integer_share")
+    if centi_share is None:
+        return _unverifiable_no_rubric(claim, result)
+    centi_share = float(centi_share)
+    lo, hi = float(m["min"]), float(m["max"])
+    median = float(m["median"])
+    evidence = {
+        "unit_claimed": "percent_0_100",
+        "median": median,
+        "min": lo,
+        "max": hi,
+        "centi_integer_share": centi_share,
+        "row_count": int(row_count),
+        "probe_sql": result.spec.sql,
+        "rubric": _PERCENT_RUBRIC_TEXT,
+    }
+    if 0.0 <= lo and hi <= 1.0:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"values confined to [{lo:.3f}, {hi:.3f}] are "
+                f"scale-ambiguous: a stored 0-to-1 fraction and legitimate "
+                f"sub-1-percent values are indistinguishable by "
+                f"distribution alone; refusing to guess"
+            ),
+        )
+    scan_limit = int(m.get("scan_limit") or 0)
+    scanned_all = scan_limit > 0 and int(row_count) < scan_limit
+    if 0.0 <= lo and median > 1.0 and hi <= 100.0 and scanned_all:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.CONFIRMED,
+            evidence=evidence,
+            rationale=(
+                f"value distribution matches a 0-to-100 percent: median "
+                f"{median:.2f} with max {hi:.2f} over the complete table"
+            ),
+        )
+    return Finding(
+        claim=claim,
+        verdict=Verdict.UNVERIFIABLE,
+        evidence=evidence,
+        rationale=(
+            f"distribution (median {median:.4f}, range [{lo:.4f}, "
+            f"{hi:.4f}]) matches neither the fraction signature nor the "
+            f"percent scale; refusing to guess"
+        ),
+    )
 
 
 def _adjudicate_unit_scale(claim: Claim, result: ProbeResult) -> Finding:
     unit = str(claim.predicate.get("unit", "")).upper()
     m = result.measurements
+    if unit == "PERCENT_0_100" and m:
+        return _adjudicate_percent(claim, result)
     if unit != "USD" or not m:
         return _unverifiable_no_rubric(claim, result)
 
@@ -324,6 +405,98 @@ def _adjudicate_domain_enum(claim: Claim, result: ProbeResult) -> Finding:
             ),
         )
     return _unverifiable_no_rubric(claim, result)
+
+
+# Deprecation rubric: "no longer used" is contradicted by material recent
+# query activity in the 30-day window before the anchor, and confirmed by a
+# literally empty window (measured over a complete, bounded scan).
+_RECENT_QUERY_CONTRADICTION_FLOOR = 10
+
+_DEPRECATION_RUBRIC_TEXT = (
+    f"over the 30 days up to and including as_of (later activity excluded): "
+    f"CONTRADICTED iff recent_queries >= "
+    f"{_RECENT_QUERY_CONTRADICTION_FLOOR}; CONFIRMED iff recent_queries == "
+    f"0 over a complete log scan (under the scan limit); otherwise "
+    f"UNVERIFIABLE"
+)
+
+
+def _adjudicate_deprecation(claim: Claim, result: ProbeResult) -> Finding:
+    if claim.predicate.get("deprecated") is not True:
+        return _unverifiable_no_rubric(claim, result)
+    m = result.measurements
+    if m.get("recent_queries") is None:
+        return _unverifiable_no_rubric(claim, result)
+    recent = int(m["recent_queries"])
+    scan_limit = int(m.get("scan_limit") or 0)
+    evidence = {
+        "recent_queries": recent,
+        "distinct_users": int(m.get("distinct_users") or 0),
+        "as_of": result.spec.as_of,
+        "log_rows_scanned": int(m.get("log_rows_scanned") or 0),
+        "scan_limit": scan_limit,
+        "probe_sql": result.spec.sql,
+        "rubric": _DEPRECATION_RUBRIC_TEXT,
+    }
+    if recent >= _RECENT_QUERY_CONTRADICTION_FLOOR:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.CONTRADICTED,
+            evidence=evidence,
+            rationale=(
+                f"described as no longer used but the query log shows "
+                f"{recent} reads by {evidence['distinct_users']} user(s) in "
+                f"the 30 days before {result.spec.as_of}"
+            ),
+        )
+    log_rows_scanned = int(m.get("log_rows_scanned") or 0)
+    window_rows_any = int(m.get("window_rows_any_table") or 0)
+    evidence["window_rows_any_table"] = window_rows_any
+    if window_rows_any == 0 and recent == 0:
+        # an empty, new, or retention-truncated log shows no life inside
+        # the window; its silence proves nothing (cycle-2 finding)
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"the query log shows no activity for ANY table in the 30 "
+                f"days before {result.spec.as_of}; a dead or truncated log "
+                f"cannot confirm silence; refusing to guess"
+            ),
+        )
+    if recent == 0 and scan_limit > 0 and log_rows_scanned < scan_limit:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.CONFIRMED,
+            evidence=evidence,
+            rationale=(
+                f"no queries in the 30 days before {result.spec.as_of} "
+                f"over the complete log; consistent with the deprecation "
+                f"claim"
+            ),
+        )
+    if recent == 0:
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"no matches in a log scan capped at {scan_limit} rows; a "
+                f"silent prefix cannot confirm the deprecation claim; "
+                f"refusing to guess"
+            ),
+        )
+    return Finding(
+        claim=claim,
+        verdict=Verdict.UNVERIFIABLE,
+        evidence=evidence,
+        rationale=(
+            f"{recent} recent query(ies) sits between silence and the "
+            f"contradiction floor ({_RECENT_QUERY_CONTRADICTION_FLOOR}); "
+            f"refusing to guess"
+        ),
+    )
 
 
 # Cadence rubric bands, in days of staleness measured against the probe's

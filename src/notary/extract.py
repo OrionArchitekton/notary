@@ -214,6 +214,15 @@ _NEGATED_FORM_RES = (
     re.compile(r"\bnot\s+always populated\b"),
 )
 _MIN_ZERO_FORMS = ("non-negative", "nonnegative", "never negative", ">= 0")
+_DEPRECATION_FORMS = (
+    "deprecat", "sunset", "obsolete", "retired", "superseded",
+    "no longer used", "do not use",
+)
+# "not deprecated" states the opposite; strip negated forms before matching
+_NEGATED_DEPRECATION_RE = re.compile(
+    r"\b(?:not|never|no longer)\s+"
+    r"(?:deprecat\w*|sunset\w*|obsolete|retired|superseded)\b"
+)
 _CLOSED_SET_MARKERS = ("one of", "must be", "allowed values", "exactly", "{")
 
 
@@ -300,6 +309,18 @@ def _predicate_ok(claim_type: ClaimType, predicate, text: str = "") -> bool:
             if not stated:
                 return False
         return has_bound
+    if claim_type is ClaimType.DEPRECATION_USAGE:
+        deprecated = predicate.get("deprecated")
+        if not isinstance(deprecated, bool):
+            return False
+        # entailment: a deprecated:true predicate must be stated by
+        # deprecation language (any common phrasing, negations stripped),
+        # not fabricated onto ordinary text
+        if deprecated is True:
+            stated = _NEGATED_DEPRECATION_RE.sub(" ", text.lower())
+            if not any(form in stated for form in _DEPRECATION_FORMS):
+                return False
+        return True
     return all(
         isinstance(predicate.get(key), typ)
         for key, typ in _PREDICATE_SHAPES[claim_type]

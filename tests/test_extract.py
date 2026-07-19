@@ -337,3 +337,55 @@ def test_open_set_enum_wording_is_not_entailed():
         llm=_CannedLLM(canned2),
     )
     assert len(claims2) == 1
+
+
+def test_fabricated_deprecated_predicate_is_dropped():
+    """Deprecation entailment: deprecated:true must be stated by deprecation
+    language in the quoted sentence, not fabricated onto ordinary text."""
+    canned = (
+        '[{"claim_type": "deprecation_usage", '
+        '"text": "Order history table.", '
+        '"predicate": {"deprecated": true}}]'
+    )
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+        descriptions={None: "Order history table."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []
+
+
+def test_equivalent_deprecation_wording_is_entailed():
+    """PR5 cycle-1 (P2 thread): retired/superseded/sunset wording states a
+    deprecation as well as the literal word."""
+    for text in (
+        "Retired 2024, superseded by fct_orders.",
+        "Sunset table. Do not use.",
+        "Obsolete since Q1.",
+    ):
+        canned = json.dumps([{
+            "claim_type": "deprecation_usage", "text": text,
+            "predicate": {"deprecated": True},
+        }])
+        claims = extract_claims(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            descriptions={None: text},
+            llm=_CannedLLM(canned),
+        )
+        assert len(claims) == 1, text
+
+
+def test_negated_deprecation_is_not_entailed():
+    """PR5 cycle-2 regression: 'not deprecated' states the OPPOSITE; the
+    predicate is dropped."""
+    canned = json.dumps([{
+        "claim_type": "deprecation_usage",
+        "text": "This table is not deprecated; it is actively maintained.",
+        "predicate": {"deprecated": True},
+    }])
+    claims = extract_claims(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+        descriptions={None: "This table is not deprecated; it is actively maintained."},
+        llm=_CannedLLM(canned),
+    )
+    assert claims == []

@@ -46,18 +46,22 @@ uv venv && uv pip install -e '.[dev]'   # or: pip install -e '.[dev]'
 | freshness | 2 | 2 | 0 | 0 | 0 |
 | completeness | 3 | 3 | 0 | 0 | 0 |
 | domain_enum | 2 | 2 | 0 | 2 | 0 |
-| deprecation_usage | 1 | 0 | 1 | 0 | 0 |
-| **total** | 12 | 8 | 4 | 4 | 0 |
+| deprecation_usage | 1 | 1 | 0 | 0 | 0 |
+| **total** | 12 | 9 | 3 | 4 | 0 |
 
 1 of 17 entries had no extraction (dim_customers.country_code); scored fail-closed: a lie counts as missed, a control is unscored and excluded from the controls and false-positive columns. Not verified.
 
-This table is published verbatim, misses included. Four deterministic rubrics
+This table is published verbatim, misses included. Five deterministic rubrics
 run today: null-share (completeness), staleness against an explicit anchor
-date (freshness), distinct-set and bounds checks (domain_enum), and the USD
-cents signature (unit_scale). Together they catch 8 of the 12 planted lies
-with zero false positives. The honest misses: three unit lies whose stated
-units (percent, milliseconds, grams) have no distribution rubric yet, and the
-deprecation lie, which needs seeded query history. Each new rubric moves its
+date (freshness), distinct-set and bounds checks (domain_enum), recent query
+activity against the warehouse query log (deprecation), and the USD cents
+signature (unit_scale). Together they catch 9 of the 12 planted lies with
+zero false positives. The three unit misses are DECLARED, not pending: a
+0-to-1 distribution is scale-ambiguous (a stored fraction and legitimate
+sub-1-percent values are indistinguishable by distribution alone; our own
+review pipeline killed the fraction rubric we first shipped for exactly that
+reason), and milliseconds/grams magnitude bands would be domain guesses.
+This project does not guess. Each new rubric moves its
 row from missed to caught; the table is regenerated, never hand-edited (a
 test fails if the README table drifts from the command's output). The one
 unextracted entry is a provider-side content-filter block on that exact

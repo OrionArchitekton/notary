@@ -455,3 +455,303 @@ def test_probe_scans_bound_rows_before_null_filter():
         sql = plan_probe(claim).sql.lower()
         assert "is not null" in sql
         assert sql.index("limit") < sql.index("is not null"), sql
+
+
+def test_fraction_scale_ambiguity_is_unverifiable_not_contradicted(warehouse):
+    """PR5 cycle-1 adjudication (Codex HIGH x2): stored-as-fraction vs
+    rounded sub-1-percent TRUE percentages is scale-invariant; any 0-1
+    distribution has a legitimate tiny-percent reading, so a
+    distribution-only rubric must NOT contradict. The seeded discount lie
+    stays a DECLARED miss (fail-closed beats a false positive)."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_orders,PROD)",
+        field_path="discount_pct",
+        claim_type=ClaimType.UNIT_SCALE,
+        text="Discount percentage between 0 and 100.",
+        predicate={"unit": "percent_0_100"},
+    )
+    result = run_probe(plan_probe(claim), warehouse)
+    assert result.error is None
+    finding = adjudicate(claim, result)
+    assert finding.verdict is Verdict.UNVERIFIABLE
+    assert "scale" in finding.rationale.lower() or "fraction" in finding.rationale.lower()
+
+
+def test_genuine_percent_distribution_is_confirmed(tmp_path):
+    """Companion: values spread across (1, 100] match the claimed scale."""
+    db = tmp_path / "p.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table t (p double)")
+    con.execute(
+        "insert into t select 1.0 + (range * 98.0 / 999) from range(1000)"
+    )
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="p",
+            claim_type=ClaimType.UNIT_SCALE,
+            text="Percent between 0 and 100.",
+            predicate={"unit": "percent_0_100"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.CONFIRMED
+
+
+def test_tiny_legitimate_percentages_are_unverifiable(tmp_path):
+    """Fail-closed middle: a column of genuinely tiny percentages (all
+    below 1) is INDISTINGUISHABLE from stored-as-fraction by magnitude
+    alone when it hugs zero; only the fraction signature (spread across
+    the full 0-to-1 interval) contradicts. Values clustered near zero
+    fall to UNVERIFIABLE."""
+    db = tmp_path / "tiny.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table t (p double)")
+    con.execute(
+        "insert into t select 0.001 + (range * 0.05 / 999) from range(1000)"
+    )
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="p",
+            claim_type=ClaimType.UNIT_SCALE,
+            text="Error rate percent between 0 and 100.",
+            predicate={"unit": "percent_0_100"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_deprecated_but_actively_read_lie_is_contradicted(warehouse):
+    """Unit-rubrics slice 2 (deprecation): the ONE behavior this locks - a
+    'no longer used' claim on a table whose seeded query history shows
+    active recent reads is CONTRADICTED with the measured query count. The
+    legacy_orders_v1 lie is the tracer."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.legacy_orders_v1,PROD)",
+        field_path=None,
+        claim_type=ClaimType.DEPRECATION_USAGE,
+        text="DEPRECATED 2025: superseded by fct_orders. No longer used.",
+        predicate={"deprecated": True},
+    )
+    result = run_probe(plan_probe(claim, as_of="2026-07-18"), warehouse)
+    assert result.error is None
+    finding = adjudicate(claim, result)
+    assert finding.verdict is Verdict.CONTRADICTED
+    assert finding.evidence["recent_queries"] >= 10
+    assert finding.rationale
+
+
+def test_genuinely_unused_deprecated_table_is_confirmed(tmp_path):
+    """Companion: a deprecated table with an EMPTY recent query history is
+    CONFIRMED (the claim holds)."""
+    db = tmp_path / "d.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table old_stuff (x integer)")
+    con.execute(
+        "create table query_log (table_name varchar, queried_at timestamp, "
+        "query_user varchar)"
+    )
+    con.execute(
+        "insert into query_log values "
+        "('other_table', timestamp '2026-07-17 10:00:00', 'ana')"
+    )
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.old_stuff,PROD)",
+            field_path=None,
+            claim_type=ClaimType.DEPRECATION_USAGE,
+            text="DEPRECATED. No longer used.",
+            predicate={"deprecated": True},
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, as_of="2026-07-18"), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.CONFIRMED
+
+
+def test_deprecation_without_query_log_is_unverifiable(tmp_path):
+    """Fail-closed: a warehouse with no query_log carries no usage evidence
+    either way; the claim falls to UNVERIFIABLE, never CONFIRMED."""
+    db = tmp_path / "nolog.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table old_stuff (x integer)")
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.old_stuff,PROD)",
+            field_path=None,
+            claim_type=ClaimType.DEPRECATION_USAGE,
+            text="DEPRECATED. No longer used.",
+            predicate={"deprecated": True},
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, as_of="2026-07-18"), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_deprecation_window_excludes_post_anchor_queries(tmp_path):
+    """PR5 cycle-1 regression (HIGH x2): queries dated AFTER as_of must not
+    count toward 'the 30 days before' it; a historical anchored run must
+    not be contradicted by later activity. (With only post-anchor rows the
+    log also shows no in-window life, so the claim is UNVERIFIABLE rather
+    than CONFIRMED: cycle-2 window-liveness rule.)"""
+    db = tmp_path / "later.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table old_stuff (x integer)")
+    con.execute(
+        "create table query_log (table_name varchar, queried_at timestamp, "
+        "query_user varchar)"
+    )
+    con.execute(
+        "insert into query_log select 'old_stuff', "
+        "timestamp '2026-07-25 10:00:00' + interval (range) hour, 'ana' "
+        "from range(20)"
+    )
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.old_stuff,PROD)",
+            field_path=None,
+            claim_type=ClaimType.DEPRECATION_USAGE,
+            text="DEPRECATED. No longer used.",
+            predicate={"deprecated": True},
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, as_of="2026-07-18"), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE  # never CONTRADICTED
+    assert finding.evidence["recent_queries"] == 0  # later reads excluded
+
+
+def test_deprecation_probe_bounds_the_log_scan():
+    """PR5 cycle-1 regression: the LIMIT bounds rows READ from query_log
+    (inner subquery), not matching output rows."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.legacy_orders_v1,PROD)",
+        field_path=None,
+        claim_type=ClaimType.DEPRECATION_USAGE,
+        text="DEPRECATED. No longer used.",
+        predicate={"deprecated": True},
+    )
+    sql = plan_probe(claim, as_of="2026-07-18").sql.lower()
+    # the table_name/date filters sit OUTSIDE the bounded subquery
+    assert ") where table_name" in sql, sql
+
+
+def test_column_level_deprecation_claim_is_unverifiable(warehouse):
+    """PR5 cycle-2 regression: table-level query logs say nothing about a
+    COLUMN's usage; a column-scoped deprecation claim gets no probe recipe
+    and falls to UNVERIFIABLE instead of borrowing table evidence."""
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.legacy_orders_v1,PROD)",
+        field_path="total_cents",
+        claim_type=ClaimType.DEPRECATION_USAGE,
+        text="DEPRECATED column. No longer used.",
+        predicate={"deprecated": True},
+    )
+    finding = adjudicate(
+        claim, run_probe(plan_probe(claim, as_of="2026-07-18"), warehouse)
+    )
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_empty_query_log_cannot_confirm_deprecation(tmp_path):
+    """PR5 cycle-2 regression: a physically complete but EMPTY (or
+    window-dead) log proves nothing about the window; CONFIRMED requires
+    the log to show life inside the window for some table."""
+    db = tmp_path / "emptylog.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table old_stuff (x integer)")
+    con.execute(
+        "create table query_log (table_name varchar, queried_at timestamp, "
+        "query_user varchar)"
+    )
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.old_stuff,PROD)",
+            field_path=None,
+            claim_type=ClaimType.DEPRECATION_USAGE,
+            text="DEPRECATED. No longer used.",
+            predicate={"deprecated": True},
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, as_of="2026-07-18"), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_qualified_log_names_also_match(tmp_path):
+    """PR5 cycle-2 regression: logs that store schema-qualified identifiers
+    (fiction_retail.old_stuff) count toward the same asset."""
+    db = tmp_path / "quallog.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("create table old_stuff (x integer)")
+    con.execute(
+        "create table query_log (table_name varchar, queried_at timestamp, "
+        "query_user varchar)"
+    )
+    con.execute(
+        "insert into query_log select 'fiction_retail.old_stuff', "
+        "timestamp '2026-07-10 10:00:00' + interval (range) hour, 'ana' "
+        "from range(15)"
+    )
+    con.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.old_stuff,PROD)",
+            field_path=None,
+            claim_type=ClaimType.DEPRECATION_USAGE,
+            text="DEPRECATED. No longer used.",
+            predicate={"deprecated": True},
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, as_of="2026-07-18"), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.CONTRADICTED
+
+
+def test_capped_scan_cannot_confirm_percent_scale(tmp_path):
+    """PR5 cycle-3 regression (HIGH): the percent CONFIRM branch requires a
+    complete scan like every other universal claim; a capped prefix of
+    in-range values proves nothing about row 100,001."""
+    ro = _big_table(
+        tmp_path, "pcap", "create table t (p double)",
+        "insert into t select 50.0 from range(100001)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="p", claim_type=ClaimType.UNIT_SCALE,
+            text="Percent between 0 and 100.",
+            predicate={"unit": "percent_0_100"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE

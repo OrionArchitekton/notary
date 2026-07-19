@@ -196,26 +196,36 @@ def main(argv: list[str] | None = None) -> int:
         # may speak for this asset; a same-named unrelated table fails here
         described_fields = [k for k in descriptions if k is not None]
         table = _urn_table(args.asset)
-        con = duckdb.connect(str(db), read_only=True)
-        try:
-            cols = [
-                r[0] for r in con.execute(
-                    "select column_name from information_schema.columns "
-                    "where table_name = ?",
-                    [table],
-                ).fetchall()
-            ]
-        finally:
-            con.close()
-        if not schema_matches(described_fields, cols):
+        if not described_fields and None in descriptions:
+            # table-only-described asset (PR5 finding: the only scope the
+            # deprecation probe supports must be reachable live): proceed
+            # on table existence alone, with the reduced evidence stated
             print(
-                f"error: the catalog's described fields "
-                f"{sorted(described_fields)} are not all present as columns "
-                f"of {table} in {db}; refusing to score this asset against "
-                f"a warehouse that does not match its schema",
-                file=sys.stderr,
+                f"binding evidence: table name and existence only "
+                f"({table} has no field descriptions to fingerprint)"
             )
-            return 2
+        else:
+            con = duckdb.connect(str(db), read_only=True)
+            try:
+                cols = [
+                    r[0] for r in con.execute(
+                        "select column_name from information_schema.columns "
+                        "where table_name = ?",
+                        [table],
+                    ).fetchall()
+                ]
+            finally:
+                con.close()
+            if not schema_matches(described_fields, cols):
+                print(
+                    f"error: the catalog's described fields "
+                    f"{sorted(described_fields)} are not all present as "
+                    f"columns of {table} in {db}; refusing to score this "
+                    f"asset against a warehouse that does not match its "
+                    f"schema",
+                    file=sys.stderr,
+                )
+                return 2
 
     try:
         claims = extract_claims(args.asset, descriptions, llm)
