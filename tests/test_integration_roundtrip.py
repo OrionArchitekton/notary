@@ -25,7 +25,7 @@ from notary.catalog import (
     ingest_manifest,
     read_descriptions,
 )
-from notary.demo.seeder import DEFAULT_SEED, build_warehouse
+from notary.demo.seeder import DEFAULT_SEED, MANIFEST, build_warehouse
 from notary.extract import ReplayLLM, extract_claims
 from notary.probe import plan_probe, run_probe
 from notary.adjudicate import adjudicate
@@ -110,7 +110,10 @@ def test_s1_round_trip_writes_verdict_back(ingested, monkeypatch):
     )
     con = duckdb.connect(str(db), read_only=True)
     try:
-        finding = adjudicate(claims[0], run_probe(plan_probe(claims[0]), con))
+        finding = adjudicate(claims[0], run_probe(plan_probe(
+                claims[0],
+                reconciliation=MANIFEST.reconciliations[("fct_payments", "amount")],
+            ), con))
     finally:
         con.close()
     assert finding.verdict is Verdict.CONTRADICTED
@@ -171,7 +174,12 @@ def test_incident_raise_and_resolve_round_trip(ingested, tmp_path):
             ReplayLLM("tests/fixtures/llm"),
         )
         findings = [
-            adjudicate(c, run_probe(plan_probe(c), con)) for c in claims
+            adjudicate(c, run_probe(plan_probe(
+                c,
+                reconciliation=MANIFEST.reconciliations.get(
+                    ("fct_payments", c.field_path)
+                ),
+            ), con)) for c in claims
         ]
     finally:
         con.close()
@@ -271,7 +279,12 @@ def test_obsolete_incident_is_resolved_by_a_clean_run(ingested):
             ReplayLLM("tests/fixtures/llm"),
         )
         findings = [
-            adjudicate(c, run_probe(plan_probe(c), con)) for c in claims
+            adjudicate(c, run_probe(plan_probe(
+                c,
+                reconciliation=MANIFEST.reconciliations.get(
+                    ("fct_payments", c.field_path)
+                ),
+            ), con)) for c in claims
         ]
     finally:
         con.close()
@@ -464,3 +477,86 @@ def test_s5_next_agent_inherits_the_verdict(ingested, tmp_path):
     assert found, "raised incident never became query-visible for cleanup"
     resolved = close_obsolete_incident(GMS, PAYMENTS_URN, run_date="2026-07-18")
     assert resolved == found
+
+
+def test_rollback_removes_all_notary_state(ingested, tmp_path):
+    """Spec Reversibility: one command removes everything a run authored
+    (ledger, dossiers, correction, incident), restores the pre-image, and
+    a re-run afterwards recreates the state (so the demo catalog is left
+    populated for reviewers)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from notary.incidents import find_open_notary_incident, incident_title
+    from notary.rollback import _read_structured_properties
+
+    repo_root = Path(__file__).parent.parent
+    env = {**os.environ, "NOTARY_RUN_DATE": "2026-07-18"}
+    _reset_editable_description(
+        PAYMENTS_URN, "amount", "Transaction amount in USD."
+    )
+
+    def _run_cli(module, *extra):
+        return subprocess.run(
+            [sys.executable, "-m", module, "--gms", GMS,
+             "--asset", PAYMENTS_URN, *extra],
+            capture_output=True, text=True, timeout=300, env=env,
+            cwd=str(repo_root),
+        )
+
+    r = _run_cli(
+        "notary.run", "--db", str(tmp_path / "rb-wh.duckdb"),
+        "--fixtures", "tests/fixtures/llm", "--demo",
+    )
+    assert r.returncode == 0, r.stderr
+
+    rb = _run_cli("notary.rollback")
+    assert rb.returncode == 0, rb.stderr + rb.stdout
+
+    # ledger gone
+    props = _read_structured_properties(GMS, PAYMENTS_URN)
+    assert not any(u.startswith("urn:li:structuredProperty:notary.") for u in props)
+    # every live Notary dossier for the asset is gone, including any from
+    # earlier runs whose ledger pointers were overwritten (search-based
+    # discovery); the document index is eventually consistent, so poll.
+    import time as _time
+
+    from notary.rollback import _search_notary_documents
+
+    remaining = None
+    deadline2 = _time.time() + 30
+    while _time.time() < deadline2:
+        remaining = _search_notary_documents(GMS, PAYMENTS_URN)
+        if not remaining:
+            break
+        _time.sleep(2)
+    assert remaining == [], f"live Notary dossiers survived: {remaining[:5]}"
+    # description restored to the pre-image
+    assert (
+        read_descriptions(GMS, PAYMENTS_URN).get("amount")
+        == "Transaction amount in USD."
+    )
+    # no open Notary incident. The incident search index is eventually
+    # consistent, so the just-resolved incident can appear open for a few
+    # seconds; poll briefly before concluding the resolve failed.
+    import time
+
+    open_incident = "unchecked"
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        open_incident = find_open_notary_incident(
+            GMS, PAYMENTS_URN, incident_title(PAYMENTS_URN)
+        )
+        if open_incident is None:
+            break
+        time.sleep(1)
+    assert open_incident is None
+
+    # leave the demo state present for reviewers
+    r2 = _run_cli(
+        "notary.run", "--db", str(tmp_path / "rb-wh2.duckdb"),
+        "--fixtures", "tests/fixtures/llm", "--demo",
+    )
+    assert r2.returncode == 0, r2.stderr

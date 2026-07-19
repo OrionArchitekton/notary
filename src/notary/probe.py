@@ -11,7 +11,7 @@ from datetime import date, datetime
 
 import duckdb
 
-from notary.types import Claim, ClaimType, ProbeResult, ProbeSpec
+from notary.types import Claim, ClaimType, ProbeResult, ProbeSpec, Reconciliation
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -43,13 +43,71 @@ def _urn_dataset_name(asset_urn: str) -> str:
     return name
 
 
-def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
+def plan_probe(
+    claim: Claim,
+    as_of: str | None = None,
+    reconciliation: "Reconciliation | None" = None,
+) -> ProbeSpec:
     """Plan the measurement SQL for a claim. Pure; never touches the DB."""
     table = _urn_table(claim.asset_urn)
     if claim.claim_type is ClaimType.UNIT_SCALE and claim.field_path:
         col = claim.field_path
         if not _IDENT.match(col):
             raise ValueError(f"unsafe column identifier: {col!r}")
+        recon_select = ""
+        recon_join = ""
+        recon_keys: tuple[str, ...] = ()
+        if reconciliation is not None:
+            for ident in (
+                reconciliation.table, reconciliation.suspect_key,
+                reconciliation.reference_key, reconciliation.reference_column,
+            ):
+                if not _IDENT.match(ident):
+                    raise ValueError(f"unsafe reconciliation identifier: {ident!r}")
+            # Bounded join of the suspect prefix against the declared
+            # reference prefix: per-key ratio suspect/reference. A true
+            # cents-as-dollars load sits at exactly 100x the major-unit
+            # reference; the tolerance absorbs IEEE 754 representation
+            # noise ONLY (measured ulp-scale, <= 2e-14 on the demo
+            # warehouse). A wider band would let a systematic business
+            # discrepancy, e.g. a 0.5% settlement fee, corroborate a
+            # false contradiction (PR #10 cycle-3 finding).
+            # Key-shape measurements travel with the join (PR #10 finding:
+            # joined ROWS alone can be inflated by duplicate keys or
+            # fan-out, and say nothing about unmatched suspect keys); the
+            # rubric requires distinct matched keys covering every suspect
+            # key, uniquely, before corroboration counts.
+            recon_join = (
+                f', suspect as (select "{reconciliation.suspect_key}" as k, '
+                f'"{col}" as v from "{table}" limit {SCAN_LIMIT})'
+                f', recon as (select count(*) as recon_joined, '
+                f'count(distinct s.k) as recon_matched_keys, '
+                f'avg(case when r."{reconciliation.reference_column}" is null '
+                f'then 0.0 when r."{reconciliation.reference_column}" = 0 '
+                f'then 0.0 when abs(s.v / r."{reconciliation.reference_column}" '
+                f'- 100.0) <= 1e-6 then 1.0 else 0.0 end) as recon_ratio_share '
+                f'from suspect s '
+                f'join (select "{reconciliation.reference_key}" as rk, '
+                f'"{reconciliation.reference_column}" from '
+                f'"{reconciliation.table}" limit {SCAN_LIMIT}) r on s.k = r.rk '
+                f'where s.v is not null)'
+                f', recon_suspect as (select count(distinct k) as '
+                f'recon_suspect_keys, count(*) as recon_suspect_rows '
+                f'from suspect where v is not null) '
+            )
+            recon_select = (
+                ", recon.recon_joined, recon.recon_matched_keys, "
+                "recon.recon_ratio_share, recon_suspect.recon_suspect_keys, "
+                "recon_suspect.recon_suspect_rows, "
+                f"(select count(*) from (select 1 from "
+                f'"{reconciliation.table}" limit {SCAN_LIMIT})) '
+                "as recon_reference_rows_scanned"
+            )
+            recon_keys = (
+                "recon_joined", "recon_matched_keys", "recon_ratio_share",
+                "recon_suspect_keys", "recon_suspect_rows",
+                "recon_reference_rows_scanned",
+            )
         # LIMIT bounds the rows READ, so the null filter sits OUTSIDE the
         # bounded subquery (cycle-3 finding: filtering first scans a sparse
         # table until it finds SCAN_LIMIT non-null values)
@@ -62,7 +120,7 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
         # prefix previously shrank the post-filter count under the limit
         # and defeated the complete-scan guard.
         sql = (
-            f'select median(v) as median, '
+            f'with base as (select median(v) as median, '
             f'avg(case when v is null then null '
             f'when v = floor(v) then 1.0 else 0.0 end) as integer_share, '
             f'avg(case when v is null then null '
@@ -71,7 +129,10 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
             f'min(v) as min, max(v) as max, count(v) as row_count, '
             f'count(*) as rows_scanned, '
             f'{SCAN_LIMIT} as scan_limit '
-            f'from (select "{col}" as v from "{table}" limit {SCAN_LIMIT})'
+            f'from (select "{col}" as v from "{table}" limit {SCAN_LIMIT}))'
+            f'{recon_join} '
+            f'select base.*{recon_select} from base'
+            f'{", recon, recon_suspect" if reconciliation is not None else ""}'
         )
         return ProbeSpec(
             claim=claim,
@@ -79,7 +140,7 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
             measure_keys=(
                 "median", "integer_share", "centi_integer_share",
                 "min", "max", "row_count", "rows_scanned", "scan_limit",
-            ),
+            ) + recon_keys,
         )
     if claim.claim_type is ClaimType.COMPLETENESS and claim.field_path:
         col = claim.field_path

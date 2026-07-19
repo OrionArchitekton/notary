@@ -36,6 +36,19 @@ class Claim:
 
 
 @dataclass(frozen=True)
+class Reconciliation:
+    """An operator-declared independent reference for a unit/scale claim:
+    where the trusted same-entity totals live (e.g. the billing system's
+    dollar-denominated export). Declared like as_of, never guessed; without
+    one, a unit distribution alone can only ever be suspicion."""
+
+    table: str
+    suspect_key: str  # join key column on the suspect table
+    reference_key: str  # join key column on the reference table
+    reference_column: str  # the trusted value column (declared major units)
+
+
+@dataclass(frozen=True)
 class ProbeSpec:
     """A deterministic measurement plan for one claim."""
 

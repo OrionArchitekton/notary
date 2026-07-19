@@ -11,12 +11,12 @@ import json
 import os
 import random
 from datetime import date, timedelta
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import duckdb
 
-from notary.types import ClaimType
+from notary.types import ClaimType, Reconciliation
 
 DEFAULT_SEED = 20260718
 
@@ -42,6 +42,12 @@ class CatalogEntry:
 @dataclass(frozen=True)
 class Manifest:
     claims: tuple[CatalogEntry, ...]
+    # Operator-declared reconciliation sources per (table, column): where
+    # the independent same-entity totals live. Declared like as_of, never
+    # guessed; a unit distribution without one can only ever be suspicion.
+    reconciliations: "dict[tuple[str, str], Reconciliation]" = field(
+        default_factory=dict
+    )
 
     def to_json(self) -> str:
         rows = []
@@ -136,11 +142,36 @@ ENTRIES: tuple[CatalogEntry, ...] = (
                  planted_text="Non-negative."),
 )
 
-MANIFEST = Manifest(claims=ENTRIES)
+MANIFEST = Manifest(
+    claims=ENTRIES,
+    reconciliations={
+        ("fct_payments", "amount"): Reconciliation(
+            table="stg_billing_totals",
+            suspect_key="order_id",
+            reference_key="order_id",
+            reference_column="total_usd",
+        ),
+    },
+)
 
 # frozen "today" so freshness lies are stable relative to generated data;
 # the demo narrative treats this as the run date.
 ANCHOR_DATE = "2026-07-18"
+
+
+def _seed_billing_totals(con: duckdb.DuckDBPyConnection) -> None:
+    """The billing system's dollar-denominated export: the independent
+    reconciliation source the unit rubric corroborates against. In the
+    fiction, billing and the warehouse ingested the SAME underlying
+    payments; billing kept dollars while the warehouse load dropped the
+    /100, so per-order totals sit at exactly 100x. Derived from the
+    already-seeded payments rows with NO rng draws, so adding this table
+    cannot shift any other table's data (seeder-invariance gate)."""
+    con.execute(
+        "create table stg_billing_totals as "
+        "select order_id, amount / 100.0 as total_usd "
+        "from fct_payments"
+    )
 
 
 def build_warehouse(db_path: str | Path, seed: int = DEFAULT_SEED) -> Manifest:
@@ -164,6 +195,7 @@ def build_warehouse(db_path: str | Path, seed: int = DEFAULT_SEED) -> Manifest:
         _seed_sessions(con, rng)
         _seed_legacy_orders(con, rng)
         _seed_inventory(con, rng)
+        _seed_billing_totals(con)
         con.execute("commit")
     except BaseException:
         con.close()

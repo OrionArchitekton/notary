@@ -76,6 +76,26 @@ def receipt_ok(receipt: dict) -> bool:
     return True
 
 
+def parse_reconcile_args(items: list[str]) -> dict:
+    """Parse repeatable --reconcile declarations
+    (FIELD=TABLE:SUSPECT_KEY:REFERENCE_KEY:REFERENCE_COLUMN) into
+    {field_path: Reconciliation}. Pure; raises ValueError on any
+    malformed item."""
+    from notary.types import Reconciliation
+
+    out: dict = {}
+    for item in items or []:
+        field, sep, rest = item.partition("=")
+        parts = rest.split(":")
+        if not sep or not field or len(parts) != 4 or not all(parts):
+            raise ValueError(
+                "--reconcile expects FIELD=TABLE:SUSPECT_KEY:"
+                f"REFERENCE_KEY:REFERENCE_COLUMN, got {item!r}"
+            )
+        out[field] = Reconciliation(*parts)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m notary.run",
@@ -100,7 +120,26 @@ def main(argv: list[str] | None = None) -> int:
         "--live", action="store_true",
         help="extract with the live Anthropic API instead of replay",
     )
+    parser.add_argument(
+        "--reconcile", action="append", default=[],
+        metavar="FIELD=TABLE:SUSPECT_KEY:REFERENCE_KEY:REFERENCE_COLUMN",
+        help="operator-declared reconciliation source for a money column "
+        "(repeatable). Required for a unit-scale CONTRADICTED verdict on "
+        "real runs: without one the cents signature is suspicion only and "
+        "stays UNVERIFIABLE. Demo mode carries the manifest's declarations "
+        "instead.",
+    )
     args = parser.parse_args(argv)
+
+    if args.demo and args.reconcile:
+        parser.error(
+            "--reconcile applies to real runs; --demo carries the "
+            "manifest's declared reconciliations"
+        )
+    try:
+        reconcile_map = parse_reconcile_args(args.reconcile)
+    except ValueError as e:
+        parser.error(str(e))
 
     # --- validation, before any network or filesystem effect ---
     run_date = os.environ.get(NOTARY_RUN_DATE_ENV)
@@ -241,8 +280,18 @@ def main(argv: list[str] | None = None) -> int:
         build_warehouse(db, seed=DEFAULT_SEED)
     con = duckdb.connect(str(db), read_only=True)
     try:
+        # Reconciliation sources are operator-declared; demo mode carries
+        # the manifest's declarations, real runs the --reconcile flags.
+        # Without one, a unit distribution can only ever reach
+        # UNVERIFIABLE (rubric v2, judge-review P0).
+        table = _urn_table(args.asset)
         findings = [
-            adjudicate(claim, run_probe(plan_probe(claim, as_of=run_date), con))
+            adjudicate(claim, run_probe(plan_probe(
+                claim, as_of=run_date,
+                reconciliation=MANIFEST.reconciliations.get(
+                    (table, claim.field_path)
+                ) if args.demo else reconcile_map.get(claim.field_path),
+            ), con))
             for claim in claims
         ]
     finally:

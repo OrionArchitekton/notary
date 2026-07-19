@@ -118,8 +118,26 @@ README and demo.
 - **Provenance labeling**: every catalog mutation Notary makes is attributable to
   Notary in that surface (ledger property, document authorship, description
   provenance line, incident reporter).
-- **Reversibility**: a single command removes all Notary-authored catalog state
-  (ledger properties, dossiers, incidents, description edits) for a given run.
+- **Reversibility**: a single command (`python -m notary.rollback --asset <urn>`)
+  removes all Notary-authored catalog state for an asset: ledger properties,
+  dossiers (the ledger's pointers plus document-search discovery, so dossiers
+  from earlier runs whose pointers a later run overwrote are still found),
+  every open Notary incident, and provenance-labeled description corrections
+  (stacked corrections from repeated runs drain to the original text; a
+  description is restored only when the current text matches Notary's own
+  correction format end to end, so text a human appended after a correction
+  refuses the restore and foreign descriptions are never touched). Dossier
+  deletion requires the document itself to attest Notary authorship for that
+  asset (title marker, related asset, and Notary's machine content format);
+  the attestation is format-borne, not cryptographic (OSS documents carry no
+  immutable creator identity), and deletion is a recoverable soft-delete.
+  Known residuals: a human edit made INSIDE a correction block is overwritten
+  by the restore (the quoted pre-image wins); the refusal boundary is the
+  block, not characters within it. And the write path reads the pre-image
+  moments before replacing the description without compare-and-swap (the
+  catalog API offers none), so a human edit landing inside that window is
+  superseded by the correction and its restore returns the pre-window text;
+  the correction's provenance label and reversibility bound the damage.
 - **Safety**: Notary edits only metadata surfaces, never warehouse data. Probes
   are read-only SQL with bounded scan cost.
 - **No Cloud dependency**: every surface used exists in DataHub OSS quickstart.

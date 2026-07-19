@@ -36,15 +36,22 @@ def _claim(table: str, column: str, text: str, unit: str) -> Claim:
 
 
 def test_cents_lie_is_contradicted(warehouse):
+    """Rubric v2: the contradiction is EARNED by the declared reconciliation
+    (billing's dollar export at exactly 100x), not by distribution alone."""
+    from notary.demo.seeder import MANIFEST
+
     claim = _claim("fct_payments", "amount", "Transaction amount in USD.", "USD")
-    spec = plan_probe(claim)
+    recon = MANIFEST.reconciliations[("fct_payments", "amount")]
+    spec = plan_probe(claim, reconciliation=recon)
     assert "fct_payments" in spec.sql
+    assert "stg_billing_totals" in spec.sql
     result = run_probe(spec, warehouse)
     assert result.error is None
     finding = adjudicate(claim, result)
     assert finding.verdict is Verdict.CONTRADICTED
     assert finding.evidence["integer_share"] == 1.0
     assert finding.evidence["median"] > 1000
+    assert finding.evidence["recon_ratio_share"] == 1.0
     assert finding.rationale
 
 
@@ -853,3 +860,215 @@ def test_capped_scan_cannot_confirm_percent_scale(tmp_path):
     finally:
         ro.close()
     assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_whole_dollar_invoices_are_unverifiable(tmp_path):
+    """Judge-review P0 regression (rubric v2): legitimate whole-dollar
+    invoices are all-integer with a high median, which matches the cents
+    signature, but distribution alone cannot prove the unit. Without a
+    declared reconciliation source the verdict is UNVERIFIABLE, never
+    CONTRADICTED."""
+    db = tmp_path / "inv.duckdb"
+    con0 = duckdb.connect(str(db))
+    con0.execute("create table invoices (amount bigint)")
+    con0.execute(
+        "insert into invoices values (1500), (2000), (2500), (3000), "
+        "(1527), (4250)"
+    )
+    con0.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.invoices,PROD)",
+            field_path="amount", claim_type=ClaimType.UNIT_SCALE,
+            text="Invoice amount in USD.", predicate={"unit": "USD"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+    assert "reconciliation" in finding.rationale
+
+
+def test_cents_lie_without_reconciliation_is_unverifiable(warehouse):
+    """Rubric v2: even the flagship cents distribution is only suspicion
+    without the declared reconciliation source."""
+    claim = _claim("fct_payments", "amount", "Transaction amount in USD.", "USD")
+    finding = adjudicate(claim, run_probe(plan_probe(claim), warehouse))
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_reconciliation_that_does_not_corroborate_stays_unverifiable(warehouse):
+    """Rubric v2: a declared reconciliation that measures a ratio away from
+    100x fails to corroborate; the verdict stays UNVERIFIABLE."""
+    from notary.types import Reconciliation
+
+    bad = Reconciliation(
+        table="fct_payments", suspect_key="payment_id",
+        reference_key="payment_id", reference_column="amount",
+    )  # ratio 1.0 against itself: no corroboration
+    claim = _claim("fct_payments", "amount", "Transaction amount in USD.", "USD")
+    finding = adjudicate(
+        claim, run_probe(plan_probe(claim, reconciliation=bad), warehouse)
+    )
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_duplicate_reference_keys_do_not_corroborate(tmp_path):
+    """Pipeline finding (PR #10): one matching suspect key duplicated 100x in
+    the reference must not clear the 100-key floor. Corroboration counts
+    DISTINCT matched keys, never joined rows a fan-out can inflate."""
+    from notary.types import Reconciliation
+
+    db = tmp_path / "dup.duckdb"
+    con0 = duckdb.connect(str(db))
+    con0.execute("create table charges (id int, amount bigint)")
+    con0.execute(
+        "insert into charges select i, 1000 + i * 100 from range(150) t(i)"
+    )
+    con0.execute("create table billing_ref (id int, total_usd double)")
+    # every reference row is the SAME single key at a perfect 100x ratio
+    con0.execute(
+        "insert into billing_ref select 0, 10.0 from range(100)"
+    )
+    con0.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.charges,PROD)",
+            field_path="amount", claim_type=ClaimType.UNIT_SCALE,
+            text="Charge amount in USD.", predicate={"unit": "USD"},
+        )
+        recon = Reconciliation(
+            table="billing_ref", suspect_key="id",
+            reference_key="id", reference_column="total_usd",
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, reconciliation=recon), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_partial_key_coverage_does_not_corroborate(tmp_path):
+    """Pipeline finding (PR #10): a reference that explains only some suspect
+    keys (here 120 of 150, all at a perfect 100x) is not corroboration for a
+    universal unit verdict; every suspect key must reconcile."""
+    from notary.types import Reconciliation
+
+    db = tmp_path / "part.duckdb"
+    con0 = duckdb.connect(str(db))
+    con0.execute("create table charges (id int, amount bigint)")
+    con0.execute(
+        "insert into charges select i, 1000 + i * 100 from range(150) t(i)"
+    )
+    con0.execute("create table billing_ref (id int, total_usd double)")
+    con0.execute(
+        "insert into billing_ref "
+        "select i, (1000 + i * 100) / 100.0 from range(120) t(i)"
+    )
+    con0.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.charges,PROD)",
+            field_path="amount", claim_type=ClaimType.UNIT_SCALE,
+            text="Charge amount in USD.", predicate={"unit": "USD"},
+        )
+        recon = Reconciliation(
+            table="billing_ref", suspect_key="id",
+            reference_key="id", reference_column="total_usd",
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, reconciliation=recon), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_null_reference_totals_do_not_corroborate(tmp_path):
+    """Pipeline finding (PR #10 cycle 2): SQL AVG ignores NULLs, so a NULL
+    reference total must count as a NON-corroborating row (0.0), never
+    vanish from the ratio; one unexplained key breaks corroboration."""
+    from notary.types import Reconciliation
+
+    db = tmp_path / "nullref.duckdb"
+    con0 = duckdb.connect(str(db))
+    con0.execute("create table charges (id int, amount bigint)")
+    con0.execute(
+        "insert into charges select i, 1000 + i * 100 from range(150) t(i)"
+    )
+    con0.execute("create table billing_ref (id int, total_usd double)")
+    con0.execute(
+        "insert into billing_ref "
+        "select i, case when i = 0 then null else (1000 + i * 100) / 100.0 "
+        "end from range(150) t(i)"
+    )
+    con0.close()
+    ro = duckdb.connect(str(db), read_only=True)
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.charges,PROD)",
+            field_path="amount", claim_type=ClaimType.UNIT_SCALE,
+            text="Charge amount in USD.", predicate={"unit": "USD"},
+        )
+        recon = Reconciliation(
+            table="billing_ref", suspect_key="id",
+            reference_key="id", reference_column="total_usd",
+        )
+        finding = adjudicate(
+            claim, run_probe(plan_probe(claim, reconciliation=recon), ro)
+        )
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_reconcile_flag_parses_into_reconciliations():
+    """Pipeline finding (PR #10): real (non-demo) runs need a way to declare
+    the reconciliation source the corroborated rubric requires."""
+    from notary.run import parse_reconcile_args
+
+    m = parse_reconcile_args(
+        ["amount=stg_billing_totals:order_id:order_id:total_usd"]
+    )
+    r = m["amount"]
+    assert r.table == "stg_billing_totals"
+    assert r.suspect_key == "order_id"
+    assert r.reference_key == "order_id"
+    assert r.reference_column == "total_usd"
+    with pytest.raises(ValueError):
+        parse_reconcile_args(["missing-equals-sign"])
+    with pytest.raises(ValueError):
+        parse_reconcile_args(["amount=only:two:parts"])
+
+
+def test_correction_quotes_the_full_preimage_not_the_claim_sentence():
+    """Pipeline finding (PR #10): the correction overwrites the WHOLE field
+    description, so the quoted pre-image must be the whole prior description,
+    not just the one extracted claim sentence; rollback round-trips it."""
+    from notary.catalog import _corrected_description
+    from notary.rollback import original_description_from_correction
+    from notary.types import Finding
+
+    claim = Claim(
+        asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.dim_customers,PROD)",
+        field_path="email", claim_type=ClaimType.COMPLETENESS,
+        text="Never null.", predicate={},
+    )
+    finding = Finding(
+        claim=claim, verdict=Verdict.CONTRADICTED,
+        evidence={"null_share": 0.2},
+        rationale="measured null_share 0.20 over a complete scan",
+    )
+    text = _corrected_description(
+        finding, "2026-07-18",
+        pre_image="Customer email address. Never null.",
+    )
+    assert '"Customer email address. Never null."' in text
+    assert (
+        original_description_from_correction(text)
+        == "Customer email address. Never null."
+    )
