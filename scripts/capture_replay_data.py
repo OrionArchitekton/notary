@@ -28,7 +28,7 @@ from notary.extract import ReplayLLM, _prompt_key  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from s5_next_agent import S5_SYSTEM, build_question  # noqa: E402
+from s5_next_agent import _ISO_DATE_RE, S5_SYSTEM, build_question  # noqa: E402
 
 PAYMENTS_TABLE = "fct_payments"
 FLAGSHIP_URN = (
@@ -45,15 +45,19 @@ DISCLOSURE = (
 )
 
 
-def _s5_views(fixtures_dir: str) -> dict:
-    """Select the two S5 answer captures, fail-closed (pipeline finding:
+def _s5_views(fixtures_dir: str, required_view2: tuple[str, ...] = ()) -> dict:
+    """Select the two S5 answer captures, fail-closed (pipeline findings:
     the free-form note plus a substring was the only selector, so a copied
     or stray S5-noted record could be published as the same-asset agent
     evidence). Each record must (a) sit under the prompt key recomputed
     from S5_SYSTEM plus its stored user prompt (the ReplayLLM binding
     rule), (b) carry the flagship asset's question, and (c) fill an empty
-    view slot; any violation aborts before output is written."""
+    view slot; the view2 prompt must additionally (d) embed every
+    required_view2 fragment, which the caller builds from the FRESH
+    evaluation, so a stale capture cannot sit beside this run's evidence
+    as one captured run. Any violation aborts before output is written."""
     views = {}
+    view2_user = ""
     question = build_question(FLAGSHIP_URN)
     for path in glob.glob(f"{fixtures_dir}/*.json"):
         p = Path(path)
@@ -79,11 +83,21 @@ def _s5_views(fixtures_dir: str) -> dict:
                 f"duplicate S5 capture for {key} ({p.name}); refusing to "
                 f"pick one silently"
             )
+        if key == "view2":
+            view2_user = user
         views[key] = record["completion"].strip()
     if set(views) != {"view1", "view2"}:
         raise RuntimeError(
             f"expected both S5 answer captures, found {sorted(views)}"
         )
+    for fragment in required_view2:
+        if fragment not in view2_user:
+            raise RuntimeError(
+                f"the S5 view2 capture's embedded catalog context does not "
+                f"carry this run's flagship evidence ({fragment!r}); the "
+                f"capture is stale relative to the evaluation it would be "
+                f"published beside; re-capture the S5 answers"
+            )
     return views
 
 
@@ -137,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
 
     findings_out = []
     after_description = None
+    flagship = None
     for r in report.entries:
         if r.entry.table != PAYMENTS_TABLE:
             continue
@@ -154,8 +169,19 @@ def main(argv: list[str] | None = None) -> int:
             findings_out.append(item)
             if f.verdict.value == "CONTRADICTED" and f.claim.field_path == "amount":
                 after_description = _corrected_description(f, ANCHOR_DATE)
-    if after_description is None:
+                flagship = f
+    if after_description is None or flagship is None:
         raise RuntimeError("the flagship cents lie was not contradicted")
+
+    # The S5 view2 prompt embeds the catalog context its answer was captured
+    # against; this run's flagship dossier line must appear in it verbatim
+    # (dates canonicalized), or the capture is stale relative to the
+    # evaluation it would be published beside.
+    flagship_line = _ISO_DATE_RE.sub(
+        "<run-date>",
+        f"field={flagship.claim.field_path}; verdict={flagship.verdict.value}; "
+        f"rationale={flagship.rationale}",
+    )
 
     data = {
         "disclosure": DISCLOSURE,
@@ -165,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         "findings": sorted(findings_out, key=lambda x: x["field"]),
         "before_description": before,
         "after_description": after_description,
-        "s5": _s5_views(args.fixtures),
+        "s5": _s5_views(args.fixtures, required_view2=(flagship_line,)),
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

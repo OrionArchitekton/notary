@@ -15,9 +15,12 @@ from pathlib import Path
 
 from notary.demo.seeder import MANIFEST
 from notary.eval import _entry_prompt_key
-from notary.extract import KNOWN_UNCAPTURABLE
+from notary.extract import KNOWN_UNCAPTURABLE, _prompt_key
 
 ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from s5_next_agent import S5_SYSTEM  # noqa: E402
 
 
 def _capture(tmp_path, name):
@@ -107,6 +110,35 @@ def test_capture_rejects_unbound_s5_fixture(tmp_path):
     record = json.loads(s5.read_text())
     record["completion"] = "An unrelated completion smuggled in as evidence."
     (fixtures / "ffffffffffffffffffffffff.json").write_text(
+        json.dumps(record)
+    )
+    r, out = _capture_with_fixtures(tmp_path, fixtures)
+    assert r.returncode != 0, (r.returncode, r.stdout)
+    assert not out.exists()
+    assert not out.with_suffix(".js").exists()
+
+
+def test_capture_rejects_stale_s5_evidence(tmp_path):
+    """The ONE behavior this locks: an S5 view2 capture whose embedded
+    catalog context disagrees with the freshly generated evidence (here, a
+    different measured median in the flagship dossier line) aborts the run.
+    The prompt-key binding alone proves file integrity, not coherence with
+    the evaluation shown beside it as one captured run."""
+    fixtures = tmp_path / "llm"
+    shutil.copytree(ROOT / "tests" / "fixtures" / "llm", fixtures)
+    view2 = next(
+        p for p in fixtures.glob("*.json")
+        if (r := json.loads(p.read_text()))
+        .get("meta", {}).get("note", "").startswith("S5")
+        and "trust ledger verdict" in r["user"]
+    )
+    record = json.loads(view2.read_text())
+    stale_user = record["user"].replace("12795", "99999")
+    assert stale_user != record["user"]
+    record["user"] = stale_user
+    view2.unlink()
+    # self-consistent: filed under the key its altered prompt hashes to
+    (fixtures / f"{_prompt_key(S5_SYSTEM, stale_user)}.json").write_text(
         json.dumps(record)
     )
     r, out = _capture_with_fixtures(tmp_path, fixtures)
