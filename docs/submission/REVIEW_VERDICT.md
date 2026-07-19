@@ -56,8 +56,11 @@ genuine:
 
 ## Post-fix state
 
-- Full suite: 115 passed (113 prior plus 2 new capped-scan regression
-  tests), exit code 0, including the live integration tests.
+- Full suite: 115 passed at review close (113 prior plus 2 new capped-scan
+  regression tests), exit code 0, including the live integration tests.
+  Subsequent post-push pipeline cycles on the packaging PR added four more
+  regression tests (null-in-prefix cap detection for both unit paths, and
+  the ledger's unverifiable-reason summary), bringing the suite to 119.
 - Replay payload regenerated with the new disclosure; committed assets
   byte-match a fresh capture; the live site serves the updated payload
   (verified logged-out with a title identity check).

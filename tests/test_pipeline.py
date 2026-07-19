@@ -810,6 +810,30 @@ def test_capped_scan_cannot_confirm_usd_dollars(tmp_path):
     assert finding.verdict is Verdict.UNVERIFIABLE
 
 
+def test_null_in_capped_prefix_cannot_confirm_percent(tmp_path):
+    """PR8 cycle-2 fix (Codex HIGH): the percent CONFIRM path must key scan
+    completeness on rows SCANNED, not the non-null count; a null inside a
+    full-cap prefix previously read as a complete scan and confirmed from
+    prefix statistics while an out-of-range value sat beyond the cap."""
+    ro = _big_table(
+        tmp_path, "pcap2", "create table t (p double)",
+        "insert into t values (NULL); "
+        "insert into t select 50.0 from range(99999); "
+        "insert into t values (200.0)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="p", claim_type=ClaimType.UNIT_SCALE,
+            text="Percent between 0 and 100.",
+            predicate={"unit": "percent_0_100"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
 def test_capped_scan_cannot_confirm_percent_scale(tmp_path):
     """PR5 cycle-3 regression (HIGH): the percent CONFIRM branch requires a
     complete scan like every other universal claim; a capped prefix of

@@ -95,6 +95,7 @@ def _adjudicate_percent(claim: Claim, result: ProbeResult) -> Finding:
         "max": hi,
         "centi_integer_share": centi_share,
         "row_count": int(row_count),
+        "rows_scanned": int(m.get("rows_scanned", row_count)),
         "probe_sql": result.spec.sql,
         "rubric": _PERCENT_RUBRIC_TEXT,
     }
@@ -110,8 +111,12 @@ def _adjudicate_percent(claim: Claim, result: ProbeResult) -> Finding:
                 f"distribution alone; refusing to guess"
             ),
         )
+    # PR8 cycle-2 fix: completeness keys on rows SCANNED (raw rows read,
+    # nulls included), mirroring the USD path; the non-null row_count can
+    # dip under the limit while the scan was still capped.
     scan_limit = int(m.get("scan_limit") or 0)
-    scanned_all = scan_limit > 0 and int(row_count) < scan_limit
+    rows_scanned = int(m.get("rows_scanned", row_count))
+    scanned_all = scan_limit > 0 and rows_scanned < scan_limit
     if 0.0 <= lo and median > 1.0 and hi <= 100.0 and scanned_all:
         return Finding(
             claim=claim,

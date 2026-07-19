@@ -107,7 +107,7 @@ step, no API key needed): the Quick start section of the README.
   tests and the demo, so the pipeline is deterministic where stability
   matters.
 - Deterministic probes and pure rubrics; every verdict carries its evidence.
-- 113 tests (8 are live integration round-trips against the quickstart,
+- 119 tests (8 are live integration round-trips against the quickstart,
   skipped when no quickstart is running): write-back, incident lifecycle,
   and the next-agent flip, plus a test that pins the README table and one
   that byte-compares the checked-in replay payload the host serves to a
