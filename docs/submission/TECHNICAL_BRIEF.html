@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notary - Judges Technical Brief</title>
+    <style>
+      :root {
+        --paper: #f6f5f2;
+        --paper-deep: #ebe9e3;
+        --ink: #171d24;
+        --ink-muted: #55606c;
+        --rule: #aab2ac;
+        --accent: #24425c;
+        --accent-deep: #16304a;
+        --bad: #b3261e;
+        --good: #1b6e3c;
+        --amber: #b07716;
+        --night: #101820;
+        --serif: "DejaVu Serif", Georgia, serif;
+        --mono: "DejaVu Sans Mono", "Liberation Mono", monospace;
+        --sans: "DejaVu Sans", Arial, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      @page { size: letter; margin: 0; }
+      html, body { width: 8.5in; margin: 0; background: var(--paper); }
+      body {
+        color: var(--ink);
+        font-family: var(--sans);
+        font-size: 10px;
+        line-height: 1.45;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      a { color: inherit; text-decoration: none; }
+      .page {
+        width: 8.5in; height: 11in;
+        padding: 0.46in 0.56in 0.4in;
+        overflow: hidden;
+        background: var(--paper);
+        page-break-after: always;
+      }
+      .page:last-child { page-break-after: auto; }
+      .top-rule { height: 6px; margin-bottom: 14px; background: var(--night); border-bottom: 2.5px solid var(--accent); }
+      .masthead { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding-bottom: 12px; border-bottom: 2px solid var(--ink); }
+      .brand { font-family: var(--serif); font-size: 34px; letter-spacing: 0.5px; }
+      .brand em { color: var(--accent-deep); font-style: normal; }
+      .tagline { margin-top: 2px; font-size: 11.5px; color: var(--ink-muted); }
+      .meta { text-align: right; font-family: var(--mono); font-size: 8.6px; color: var(--ink-muted); line-height: 1.6; }
+      .meta b { color: var(--ink); }
+      h2 {
+        margin: 15px 0 6px;
+        font-family: var(--serif); font-size: 14.5px;
+        color: var(--night);
+        border-bottom: 1px solid var(--rule);
+        padding-bottom: 3px;
+      }
+      p { margin: 4px 0; }
+      .cols { display: flex; gap: 20px; }
+      .col { flex: 1; min-width: 0; }
+      .hero-panel {
+        margin-top: 10px;
+        display: flex; gap: 14px;
+        background: var(--night); color: #e9f0f6;
+        border-radius: 8px; padding: 12px 16px;
+      }
+      .hero-stat { flex: 1; }
+      .hero-stat .n { font-family: var(--serif); font-size: 24px; color: #8fb4d8; }
+      .hero-stat .n.bad { color: #ff8b81; }
+      .hero-stat .n.good { color: #6fd394; }
+      .hero-stat .l { font-size: 8.6px; color: #a9b8c6; line-height: 1.35; margin-top: 2px; }
+      .pipeline { margin-top: 8px; }
+      .step { display: flex; gap: 10px; margin: 7px 0; }
+      .step .tag {
+        flex: 0 0 84px;
+        font-family: var(--mono); font-size: 8.2px; font-weight: bold;
+        color: var(--accent-deep);
+        border-right: 2px solid var(--accent);
+        padding-right: 8px; text-align: right;
+      }
+      .step .body { flex: 1; }
+      .chips { margin: 6px 0; }
+      .chip {
+        display: inline-block; margin: 2px 3px 2px 0; padding: 2px 8px;
+        border: 1px solid var(--rule); border-radius: 10px;
+        font-family: var(--mono); font-size: 8.2px; color: var(--ink-muted);
+        background: var(--paper-deep);
+      }
+      .honesty {
+        margin-top: 10px; padding: 10px 12px;
+        border-left: 3.5px solid var(--amber);
+        background: #f7f1e2;
+      }
+      .honesty h3 { margin: 0 0 4px; font-size: 10.5px; color: var(--amber); text-transform: uppercase; letter-spacing: 1px; }
+      .quote {
+        margin: 6px 0; padding: 8px 10px;
+        border-left: 3px solid var(--accent);
+        background: var(--paper-deep);
+        font-style: italic; color: var(--ink-muted);
+      }
+      .quote b { color: var(--ink); font-style: normal; }
+      ol.sixty { margin: 6px 0 0 18px; padding: 0; }
+      ol.sixty li { margin: 5px 0; }
+      table.score { border-collapse: collapse; width: 100%; font-size: 8.8px; font-family: var(--mono); margin-top: 6px; }
+      table.score th, table.score td { border: 1px solid var(--rule); padding: 3px 6px; text-align: left; }
+      table.score th { background: var(--paper-deep); }
+      .foot {
+        margin-top: 14px; padding-top: 8px;
+        border-top: 2px solid var(--ink);
+        display: flex; justify-content: space-between;
+        font-family: var(--mono); font-size: 8.2px; color: var(--ink-muted);
+      }
+      .kv { font-family: var(--mono); font-size: 8.6px; }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="top-rule"></div>
+      <div class="masthead">
+        <div>
+          <div class="brand">No<em>tary</em></div>
+          <div class="tagline">The context lie detector: it cross-examines a data catalog's claims against measured reality and writes the verdicts back.</div>
+        </div>
+        <div class="meta">
+          <b>DataHub Agent Hackathon</b><br />
+          Category 1: Agents That Do Real Work<br />
+          notary-replay.vercel.app<br />
+          github.com/OrionArchitekton/notary
+        </div>
+      </div>
+
+      <h2>The problem</h2>
+      <p>A column says "transaction amount in USD" but stores integer cents. An agent grounded on that catalog can put a revenue calculation 100x off, with the catalog's own authority behind it. Catalogs accumulate claims about units, freshness, completeness, enums, and deprecation, and nothing checks whether they are still true. As agents inherit catalogs as ground truth, a stale claim stops being an annoyance and becomes an amplifier.</p>
+
+      <div class="hero-panel">
+        <div class="hero-stat"><div class="n">12</div><div class="l">catalog lies planted across 5 claim types in the seeded demo warehouse</div></div>
+        <div class="hero-stat"><div class="n good">9</div><div class="l">caught with evidence; every miss declared with its reason, never hidden</div></div>
+        <div class="hero-stat"><div class="n good">0</div><div class="l">false positives across the truthful controls</div></div>
+        <div class="hero-stat"><div class="n">115</div><div class="l">tests, incl. live DataHub round trips and a pin that fails if the published table drifts</div></div>
+      </div>
+
+      <h2>What it does</h2>
+      <div class="pipeline">
+        <div class="step"><div class="tag">READ</div><div class="body">Reads the asset's live descriptions from DataHub (GraphQL), consuming what the catalog actually says right now.</div></div>
+        <div class="step"><div class="tag">EXTRACT</div><div class="body">Claude extracts typed, checkable claims behind strict entailment gates: a claim the description does not actually state never reaches a probe. Failed extractions are disclosed and left unverified, never guessed at.</div></div>
+        <div class="step"><div class="tag">PROBE</div><div class="body">Deterministic, bounded, read-only SQL against the warehouse. Scans are capped; universal claims get a verdict only from complete scans.</div></div>
+        <div class="step"><div class="tag">ADJUDICATE</div><div class="body">A pure three-way rubric per claim type: CONFIRMED, CONTRADICTED, or UNVERIFIABLE, fail-closed, every verdict carrying its evidence.</div></div>
+        <div class="step"><div class="tag">WRITE BACK</div><div class="body">Through the DataHub MCP Server: a trust ledger (structured properties), an evidence dossier per adjudicated claim (documents), and a provenance-labeled corrected description. A contradicted unit claim on an asset with recorded query traffic also raises an operational incident (GraphQL), and that danger gate fails closed without usage evidence.</div></div>
+      </div>
+
+      <h2>The differentiator</h2>
+      <p><b>The verdict lives where the next reader looks.</b> Humans see the correction and the incident in the DataHub UI; agents inherit the trust ledger through the stock MCP read tools. We demonstrate the flip end to end: a minimal catalog-grounded agent reading only through stock MCP tools relays the unverified USD claim when the ledger is withheld, and refuses it, quoting the measured cents evidence, when the ledger is present. Both answers are captured and shown side by side on the replay page.</p>
+      <p><b>And the scorecard is honest.</b> The evaluation table is published verbatim, misses included, and regenerated by one command; a test fails if the README table drifts from the command's output.</p>
+
+      <div class="foot">
+        <div>Notary. Judges' Technical Brief, page 1 of 2.</div>
+        <div>Apache-2.0. Python + DuckDB + DataHub OSS quickstart.</div>
+      </div>
+    </div>
+
+    <div class="page">
+      <div class="top-rule"></div>
+      <h2>Engineering rigor</h2>
+      <div class="cols">
+        <div class="col">
+          <p><b>Deterministic where stability matters.</b> Captured Claude completions replay verbatim (prompt-key bound; a fixture copied under another key, drifted from its prompt, or stale relative to the fresh evidence aborts the build). The warehouse rebuilds from a fixed seed; probes and rubrics are pure. Two replay-data builds are byte-identical, and the committed payload the host serves is byte-compared to a fresh capture in the suite.</p>
+          <p><b>Fail-closed as a discipline.</b> Fixture-store completeness and unexpected extraction failures abort before anything is published (exit 2/3). The incident gate requires catalog usage evidence and refuses to fire without it. UNVERIFIABLE is a first-class verdict, never hidden.</p>
+          <p><b>Bounded probes.</b> Read-only connections, capped scans, and a complete-scan bar for every universal claim, including both verdicts of the flagship USD rubric.</p>
+        </div>
+        <div class="col">
+          <p><b>Reviewed adversarially, and it drew blood.</b> Two independent engines (an internal adversarial fleet and Codex) refuted every judge-facing sentence against the code, tests, git history, and live site. All findings were fixed, several against our own favorite claims:</p>
+          <div class="quote">The percent rubric we first shipped was <b>killed by our own review pipeline</b>: a stored fraction and legitimate sub-1-percent values are indistinguishable by distribution alone, so contradiction is now unreachable by design.</div>
+          <div class="quote">The USD rubric could issue a verdict from capped-scan prefix statistics; review forced it to <b>require a complete scan for both verdicts</b>, with regression tests.</div>
+          <div class="quote">The demo narration claimed the pre-ledger agent "repeats the lie"; our own captured answer showed it hedging instead, so <b>the copy was rewritten to match the evidence</b>.</div>
+        </div>
+      </div>
+
+      <h2>Challenges</h2>
+      <p>Extraction gating is where honesty is won or lost: entailment checks (token-aware, negation-aware, closed-set) keep Claude from probing claims the description never made. One capture prompt is deterministically refused by the provider's content filter; it is declared, scored fail-closed, and disclosed in the published table rather than dropped. Incident idempotency rides on search-index eventual consistency, so raise-or-reuse is resolved by a stable title lookup with the consistency window documented.</p>
+
+      <h2>The honest scorecard</h2>
+      <table class="score">
+        <tr><th>claim type</th><th>planted lies</th><th>caught</th><th>missed</th><th>controls</th><th>false positives</th></tr>
+        <tr><td>unit_scale</td><td>4</td><td>1</td><td>3</td><td>2</td><td>0</td></tr>
+        <tr><td>freshness</td><td>2</td><td>2</td><td>0</td><td>0</td><td>0</td></tr>
+        <tr><td>completeness</td><td>3</td><td>3</td><td>0</td><td>0</td><td>0</td></tr>
+        <tr><td>domain_enum</td><td>2</td><td>2</td><td>0</td><td>2</td><td>0</td></tr>
+        <tr><td>deprecation_usage</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td></tr>
+        <tr><td><b>total</b></td><td><b>12</b></td><td><b>9</b></td><td><b>3</b></td><td><b>4</b></td><td><b>0</b></tr>
+      </table>
+      <p class="kv">The three unit misses are declared, not pending: 0-to-1 distributions are scale-ambiguous by design, and magnitude bands for ms or grams would be domain guesses. This project does not guess.</p>
+
+      <div class="honesty">
+        <h3>Try it in 60 seconds</h3>
+        <ol class="sixty">
+          <li>Open <b>notary-replay.vercel.app</b>: the frozen, reproducible replay of the recorded run, disclosed on-page.</li>
+          <li>Expand the flagship evidence dossier: the probe SQL and measurements, exactly as Notary writes them to DataHub.</li>
+          <li>Read the two captured agent answers side by side: the same catalog, with and without Notary's trust ledger.</li>
+        </ol>
+      </div>
+
+      <div class="chips">
+        <span class="chip">python</span><span class="chip">duckdb</span><span class="chip">datahub oss</span><span class="chip">mcp-server-datahub</span><span class="chip">claude-opus-4-8</span><span class="chip">graphql</span><span class="chip">structured properties</span><span class="chip">playwright</span><span class="chip">vercel</span><span class="chip">apache-2.0</span>
+      </div>
+
+      <div class="foot">
+        <div>Notary. Judges' Technical Brief, page 2 of 2.</div>
+        <div>Full local quickstart in the README. No API key needed for the replay paths.</div>
+      </div>
+    </div>
+  </body>
+</html>

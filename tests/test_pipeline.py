@@ -736,6 +736,48 @@ def test_qualified_log_names_also_match(tmp_path):
     assert finding.verdict is Verdict.CONTRADICTED
 
 
+def test_capped_scan_cannot_contradict_usd_cents(tmp_path):
+    """Overclaim-review fix (Codex C3): the cents CONTRADICTION asserts
+    "every value is an integer", a universal statement, so a capped prefix
+    cannot support it; when the scan hits its cap the USD rubric falls to
+    UNVERIFIABLE instead of contradicting from prefix statistics."""
+    ro = _big_table(
+        tmp_path, "ucap1", "create table t (v bigint)",
+        "insert into t select 12795 from range(100001)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="v", claim_type=ClaimType.UNIT_SCALE,
+            text="Transaction amount in USD.",
+            predicate={"unit": "USD"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_capped_scan_cannot_confirm_usd_dollars(tmp_path):
+    """Same gate, confirm side: a plausible-dollars PREFIX cannot confirm
+    the unit claim for rows beyond the cap."""
+    ro = _big_table(
+        tmp_path, "ucap2", "create table t (v double)",
+        "insert into t select 19.99 + (random() * 0.5) from range(100001)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="v", claim_type=ClaimType.UNIT_SCALE,
+            text="List price in USD.",
+            predicate={"unit": "USD"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
 def test_capped_scan_cannot_confirm_percent_scale(tmp_path):
     """PR5 cycle-3 regression (HIGH): the percent CONFIRM branch requires a
     complete scan like every other universal claim; a capped prefix of

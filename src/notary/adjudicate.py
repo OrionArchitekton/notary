@@ -31,7 +31,8 @@ _RUBRIC_TEXT = (
     f"CONTRADICTED iff integer_share == {_CENTS_INTEGER_SHARE} and median > "
     f"{_CENTS_MEDIAN_FLOOR}; CONFIRMED iff fractional_share >= "
     f"{_DOLLARS_FRACTIONAL_FLOOR} and 0 < median <= {_DOLLARS_MEDIAN_CEILING}; "
-    f"otherwise UNVERIFIABLE"
+    f"otherwise UNVERIFIABLE; either verdict requires a complete scan "
+    f"(under the scan limit)"
 )
 
 
@@ -163,6 +164,21 @@ def _adjudicate_unit_scale(claim: Claim, result: ProbeResult) -> Finding:
         "probe_sql": result.spec.sql,
         "rubric": _RUBRIC_TEXT,
     }
+    # Overclaim-review fix (Codex C3): both unit verdicts rest on universal
+    # distribution statements ("every value is an integer" / the dollars
+    # signature), so a scan that hit its cap yields prefix statistics that
+    # support neither; same complete-scan bar as every other universal claim.
+    scan_limit = m.get("scan_limit")
+    if scan_limit is not None and int(row_count) >= int(scan_limit):
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"scan capped at {int(scan_limit)} rows; prefix statistics "
+                f"cannot support a universal unit verdict; refusing to guess"
+            ),
+        )
     if integer_share == _CENTS_INTEGER_SHARE and median > _CENTS_MEDIAN_FLOOR:
         return Finding(
             claim=claim,

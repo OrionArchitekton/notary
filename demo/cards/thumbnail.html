@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>thumbnail</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    width: 1280px; height: 720px; overflow: hidden;
+    background: radial-gradient(1200px 800px at 20% 10%, #1c2733 0%, #0d1218 55%, #090c10 100%);
+    color: #e8e6e1; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .wrap { width: 1120px; }
+  .kicker {
+    font-size: 26px; letter-spacing: .18em; text-transform: uppercase;
+    color: #8fb4d8; margin-bottom: 18px; font-weight: 600;
+  }
+  h1 { font-size: 130px; line-height: 1; letter-spacing: -0.02em; margin-bottom: 22px; }
+  .tag { font-size: 40px; color: #b9c2cc; margin-bottom: 46px; }
+  .row { display: flex; gap: 26px; align-items: stretch; }
+  .card {
+    flex: 1; border-radius: 14px; padding: 26px 30px;
+    font-family: ui-monospace, "Cascadia Code", monospace; font-size: 27px; line-height: 1.45;
+    border: 1px solid #2a3340; background: #10161d;
+  }
+  .card .label { font-size: 20px; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 12px; }
+  .lie { border-left: 6px solid #ff6b60; }
+  .lie .label { color: #ff6b60; }
+  .truth { border-left: 6px solid #57c07a; }
+  .truth .label { color: #57c07a; }
+  .strike { text-decoration: line-through; text-decoration-color: #ff6b60; text-decoration-thickness: 3px; color: #93a0ad; }
+  .em { color: #e8e6e1; font-weight: 700; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="kicker">DataHub Agent Hackathon</div>
+    <h1>Notary</h1>
+    <div class="tag">The context lie detector for your data catalog</div>
+    <div class="row">
+      <div class="card lie">
+        <div class="label">Catalog says</div>
+        <div><span class="strike">"Transaction amount in USD."</span></div>
+      </div>
+      <div class="card truth">
+        <div class="label">Warehouse measured</div>
+        <div>median <span class="em">12795</span>, all integers: <span class="em">cents, not dollars</span></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

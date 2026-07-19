@@ -1,0 +1,309 @@
+/home/orion/.worktrees/codex/notary-demo-video/.venv/lib/python3.14/site-packages/mcp_server_datahub/tools/save_document.py:27: ExperimentalWarning: The new datahub SDK (e.g. datahub.sdk.*) is experimental. Our typical backwards-compatibility and stability guarantees do not apply to this code. When it's promoted to stable, the import path will change from `from datahub.sdk import ...` to `from datahub import ...`.
+  from datahub.sdk import Document
+2026-07-18 18:49:04.510 | INFO     | mcp_server_datahub.view_helpers:<module>:21 - Default view application ENABLED (cache TTL: 5 minutes)
+2026-07-18 18:49:04.513 | INFO     | mcp_server_datahub.mcp_server:register_all_tools:425 - Registering MCP tools (is_oss=True)
+2026-07-18 18:49:04.528 | INFO     | mcp_server_datahub.mcp_server:register_mutation_tools:230 - Mutation Tools ENABLED MCP Server.
+2026-07-18 18:49:04.538 | INFO     | mcp_server_datahub.mcp_server:register_mutation_tools:268 - Save Document ENABLED - registering save_document tool
+2026-07-18 18:49:04.541 | INFO     | mcp_server_datahub.mcp_server:register_user_tools:288 - User Tools DISABLED MCP Server.
+2026-07-18 18:49:04.541 | INFO     | mcp_server_datahub.mcp_server:register_data_quality_tools:395 - Data Quality Tools DISABLED MCP Server.
+[07/18/26 18:49:05] INFO     Starting MCP server 'datahub' with transport.py:241
+                             transport 'stdio'                                  
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+2026-07-18 18:49:05.028 | DEBUG    | mcp_server_datahub.document_tools_middleware:_query_documents_exist_cached:98 - Document check cache miss, querying DataHub
+2026-07-18 18:49:05.028 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:444 - Executing GraphQL documentSearch: is_cloud=False, newer_gms_enabled=False
+2026-07-18 18:49:05.028 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:448 - GraphQL query for documentSearch:
+# GraphQL query for searching Document entities (keyword search)
+# Returns document metadata WITHOUT content to avoid context bloat
+
+fragment DocumentSearchInfo on Document {
+  urn
+  subType
+  platform {
+    urn
+    name
+  }
+  info {
+    title
+    source {
+      sourceType
+      externalUrl
+    }
+    lastModified {
+      time
+      actor {
+        urn
+      }
+    }
+    created {
+      time
+      actor {
+        urn
+      }
+    }
+  }
+  domain {
+    domain {
+      urn
+      properties {
+        name
+      }
+    }
+  }
+  tags {
+    tags {
+      tag {
+        urn
+        properties {
+          name
+        }
+      }
+    }
+  }
+  glossaryTerms {
+    terms {
+      term {
+        urn
+        properties {
+          name
+        }
+      }
+    }
+  }
+}
+
+fragment DocumentFacetEntityInfo on Entity {
+  ... on GlossaryTerm {
+    properties {
+      name
+    }
+  }
+  ... on Domain {
+    properties {
+      name
+    }
+  }
+}
+
+query documentSearch(
+  $query: String!
+  $orFilters: [AndFilterInput!]
+  $count: Int!
+  $start: Int!
+  $viewUrn: String
+) {
+  searchAcrossEntities(
+    input: {
+      query: $query
+      count: $count
+      start: $start
+      types: [DOCUMENT]
+      orFilters: $orFilters
+      viewUrn: $viewUrn
+      searchFlags: { skipHighlighting: true, maxAggValues: 10 }
+    }
+  ) {
+    start
+    count
+    total
+    searchResults {
+      entity {
+        ... on Document {
+          ...DocumentSearchInfo
+        }
+      }
+    }
+    facets {
+      field
+      displayName
+      aggregations {
+        value
+        count
+        displayName
+        entity {
+          ...DocumentFacetEntityInfo
+        }
+      }
+    }
+  }
+}
+
+Variables: {'query': '*', 'orFilters': [], 'count': 1, 'start': 0, 'viewUrn': None}
+2026-07-18 18:49:05.053 | DEBUG    | mcp_server_datahub.document_tools_middleware:_query_documents_exist_cached:122 - Document count query returned total=234
+2026-07-18 18:49:05.053 | INFO     | mcp_server_datahub.document_tools_middleware:_query_documents_exist_cached:125 - Document check result: True (cached for 60s)
+2026-07-18 18:49:05.053 | DEBUG    | mcp_server_datahub.document_tools_middleware:filter_document_tools:189 - Documents exist in catalog, returning all tools
+2026-07-18 18:49:05.054 | DEBUG    | mcp_server_datahub.version_requirements:_get_server_version_info:187 - Server version info for http://localhost:8080: is_cloud=False, version=(1, 6, 0, 0) (cached for 60s)
+2026-07-18 18:49:05.058 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:444 - Executing GraphQL getMe: is_cloud=False, newer_gms_enabled=False
+2026-07-18 18:49:05.058 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:448 - GraphQL query for getMe:
+
+        query getMe {
+            me {
+                corpUser {
+                    urn
+                    username
+                    info {
+                        displayName
+                        fullName
+                        firstName
+                        lastName
+                    }
+                    editableProperties {
+                        displayName
+                    }
+                }
+            }
+        }
+    
+Variables: {}
+INFO:mcp_server_datahub.tools.save_document:Creating new document - setting owners: ['urn:li:corpuser:__datahub_system']
+INFO:mcp_server_datahub.tools.save_document:Document to upsert: URN=urn:li:document:shared-68748fef-65a0-4b9b-ba9f-c67d1fe1be0f, owners=['urn:li:corpuser:__datahub_system'], parent=urn:li:document:__system_shared_documents
+INFO:mcp_server_datahub.tools.save_document:Upsert completed successfully
+INFO:mcp_server_datahub.tools.save_document:Successfully created document: urn:li:document:shared-68748fef-65a0-4b9b-ba9f-c67d1fe1be0f
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+2026-07-18 18:49:05.272 | DEBUG    | mcp_server_datahub.document_tools_middleware:filter_document_tools:189 - Documents exist in catalog, returning all tools
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+2026-07-18 18:49:05.279 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:444 - Executing GraphQL getMe: is_cloud=False, newer_gms_enabled=False
+2026-07-18 18:49:05.279 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:448 - GraphQL query for getMe:
+
+        query getMe {
+            me {
+                corpUser {
+                    urn
+                    username
+                    info {
+                        displayName
+                        fullName
+                        firstName
+                        lastName
+                    }
+                    editableProperties {
+                        displayName
+                    }
+                }
+            }
+        }
+    
+Variables: {}
+INFO:mcp_server_datahub.tools.save_document:Creating new document - setting owners: ['urn:li:corpuser:__datahub_system']
+INFO:mcp_server_datahub.tools.save_document:Document to upsert: URN=urn:li:document:shared-32174583-1e87-45b8-a4d8-ae110483d330, owners=['urn:li:corpuser:__datahub_system'], parent=urn:li:document:__system_shared_documents
+INFO:mcp_server_datahub.tools.save_document:Upsert completed successfully
+INFO:mcp_server_datahub.tools.save_document:Successfully created document: urn:li:document:shared-32174583-1e87-45b8-a4d8-ae110483d330
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+2026-07-18 18:49:05.538 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:444 - Executing GraphQL getStructuredProperty: is_cloud=False, newer_gms_enabled=False
+2026-07-18 18:49:05.538 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:448 - GraphQL query for getStructuredProperty:
+
+        query getStructuredProperty($urn: String!) {
+            entity(urn: $urn) {
+                urn
+                type
+                ... on StructuredPropertyEntity {
+                    definition {
+                        qualifiedName
+                        entityTypes {
+                            urn
+                            type
+                            info {
+                                type
+                            }
+                        }
+                        valueType {
+                            urn
+                            info {
+                                qualifiedName
+                            }
+                        }
+                        cardinality
+                    }
+                }
+            }
+        }
+    
+Variables: {'urn': 'urn:li:structuredProperty:notary.verdict'}
+2026-07-18 18:49:05.545 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:444 - Executing GraphQL getStructuredProperty: is_cloud=False, newer_gms_enabled=False
+2026-07-18 18:49:05.545 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:448 - GraphQL query for getStructuredProperty:
+
+        query getStructuredProperty($urn: String!) {
+            entity(urn: $urn) {
+                urn
+                type
+                ... on StructuredPropertyEntity {
+                    definition {
+                        qualifiedName
+                        entityTypes {
+                            urn
+                            type
+                            info {
+                                type
+                            }
+                        }
+                        valueType {
+                            urn
+                            info {
+                                qualifiedName
+                            }
+                        }
+                        cardinality
+                    }
+                }
+            }
+        }
+    
+Variables: {'urn': 'urn:li:structuredProperty:notary.verified_at'}
+2026-07-18 18:49:05.552 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:444 - Executing GraphQL getStructuredProperty: is_cloud=False, newer_gms_enabled=False
+2026-07-18 18:49:05.552 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:448 - GraphQL query for getStructuredProperty:
+
+        query getStructuredProperty($urn: String!) {
+            entity(urn: $urn) {
+                urn
+                type
+                ... on StructuredPropertyEntity {
+                    definition {
+                        qualifiedName
+                        entityTypes {
+                            urn
+                            type
+                            info {
+                                type
+                            }
+                        }
+                        valueType {
+                            urn
+                            info {
+                                qualifiedName
+                            }
+                        }
+                        cardinality
+                    }
+                }
+            }
+        }
+    
+Variables: {'urn': 'urn:li:structuredProperty:notary.evidence'}
+2026-07-18 18:49:05.559 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:444 - Executing GraphQL upsertStructuredProperties: is_cloud=False, newer_gms_enabled=False
+2026-07-18 18:49:05.559 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:448 - GraphQL query for upsertStructuredProperties:
+
+        mutation upsertStructuredProperties($input: UpsertStructuredPropertiesInput!) {
+            upsertStructuredProperties(input: $input) {
+                properties {
+                    structuredProperty {
+                        urn
+                    }
+                }
+            }
+        }
+    
+Variables: {'input': {'assetUrn': 'urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)', 'structuredPropertyInputParams': [{'structuredPropertyUrn': 'urn:li:structuredProperty:notary.verdict', 'values': [{'stringValue': 'MIXED'}]}, {'structuredPropertyUrn': 'urn:li:structuredProperty:notary.verified_at', 'values': [{'stringValue': '2026-07-18'}]}, {'structuredPropertyUrn': 'urn:li:structuredProperty:notary.evidence', 'values': [{'stringValue': '2 claims: 1 CONFIRMED, 1 CONTRADICTED | urn:li:document:shared-68748fef-65a0-4b9b-ba9f-c67d1fe1be0f; urn:li:document:shared-32174583-1e87-45b8-a4d8-ae110483d330'}]}]}}
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+2026-07-18 18:49:05.833 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:444 - Executing GraphQL updateDescription: is_cloud=False, newer_gms_enabled=False
+2026-07-18 18:49:05.834 | DEBUG    | mcp_server_datahub.graphql_helpers:execute_graphql:448 - GraphQL query for updateDescription:
+
+        mutation updateDescription($input: DescriptionUpdateInput!) {
+            updateDescription(input: $input)
+        }
+    
+Variables: {'input': {'description': '[Contradicted by Notary 2026-07-18] The prior description said "Transaction amount in USD.", but the stored values are inconsistent with it (measured median 12795 with integer_share 1.00; described as USD but every value is an integer with median 12795; consistent with integer cents, not dollars). See the Notary evidence dossier before trusting either statement.', 'resourceUrn': 'urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)', 'subResource': 'amount', 'subResourceType': 'DATASET_FIELD'}}
+reading live catalog descriptions for urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)
+2 described field(s), 2 claim(s) survived the extraction gates
+  CONTRADICTED  amount: described as USD but every value is an integer with median 12795; consistent with integer cents, not dollars
+  CONFIRMED     currency: complete distinct set ['EUR', 'GBP', 'USD'] over all 2000 rows sits inside the claimed set
+write-back: ledger=True dossiers=2/2 descriptions=1/1
+incident raised: urn:li:incident:2dd2d2f9-f491-4184-81b9-dd195d3f9175

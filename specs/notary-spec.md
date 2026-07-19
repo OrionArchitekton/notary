@@ -61,8 +61,11 @@ Acceptance: a catalog reader can see verdict, evidence, and corrected text on th
 asset without leaving the catalog UI.
 
 ### S2. The honest confirmation
-A column described "ISO-3166 alpha-2 country code" whose values all match the
-enum. Verdict CONFIRMED; ledger entry written; the description is NOT modified.
+A column with a truthful enum description whose values all match the claimed
+set (demonstrated with "ISO-4217 currency code"; the originally chosen
+ISO-3166 country-code column's extraction prompt is provider-blocked, so that
+entry is scored fail-closed as unscored in the evaluation instead). Verdict
+CONFIRMED; ledger entry written; the description is NOT modified.
 Acceptance: confirmed assets gain a verified badge and nothing else changes.
 
 ### S3. Fail-closed on the unverifiable
