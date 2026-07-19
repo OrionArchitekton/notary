@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notary: replay of a captured run</title>
+<style>
+  :root {
+    --bg: #f7f6f2; --ink: #1c1c1c; --card: #ffffff; --line: #d8d4cb;
+    --bad: #b3261e; --good: #1b6e3c; --dim: #6b6b6b; --accent: #24425c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --ink: #e8e6e1; --card: #1d2026;
+      --line: #333842; --bad: #ff6b60; --good: #57c07a; --dim: #9a9a9a;
+      --accent: #8fb4d8;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+  h1 { font-size: 1.9rem; margin: 0 0 .3rem; }
+  h2 { font-size: 1.25rem; margin: 2.2rem 0 .6rem; color: var(--accent); }
+  .tagline { color: var(--dim); margin: 0 0 1.2rem; }
+  .disclosure {
+    border: 1px solid var(--line); border-left: 4px solid var(--accent);
+    background: var(--card); padding: .8rem 1rem; border-radius: 6px;
+    font-size: .95rem;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: 1rem; margin: .8rem 0;
+  }
+  .verdict { font-weight: 700; letter-spacing: .03em; }
+  .verdict.CONTRADICTED { color: var(--bad); }
+  .verdict.CONFIRMED { color: var(--good); }
+  .verdict.UNVERIFIABLE { color: var(--dim); }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { border: 1px solid var(--line); padding: .4rem .6rem; text-align: left; }
+  .scroll { overflow-x: auto; }
+  pre {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: .8rem; overflow-x: auto; font-size: .82rem; white-space: pre-wrap;
+  }
+  .before { border-left: 4px solid var(--bad); }
+  .after { border-left: 4px solid var(--good); }
+  .label { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+  a { color: var(--accent); }
+  footer { margin-top: 3rem; color: var(--dim); font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Notary</h1>
+  <p class="tagline">The context lie detector: it cross-examines a data
+  catalog's claims against measured reality and writes the verdicts back.</p>
+
+  <div class="disclosure" id="disclosure"></div>
+
+  <h2>The honest evaluation table</h2>
+  <p>Twelve lies planted across five claim types, plus truthful controls.
+  Published verbatim, misses included; the repository test suite fails if
+  this table drifts from the command output.</p>
+  <div class="scroll" id="eval-table"></div>
+
+  <h2>The flagship catch: cents stored as dollars</h2>
+  <div class="card before">
+    <div class="label">Catalog description before</div>
+    <div id="before"></div>
+  </div>
+  <div class="card after">
+    <div class="label">Catalog description after (provenance-labeled)</div>
+    <div id="after"></div>
+  </div>
+
+  <h2>Findings on fct_payments</h2>
+  <div id="findings"></div>
+
+  <h2>The next agent inherits the verdict</h2>
+  <p>A second, independent agent session read the same asset through the
+  stock DataHub MCP read tools. Its captured answers, side by side:</p>
+  <div class="card before">
+    <div class="label">Pre-Notary catalog view (trust ledger withheld)</div>
+    <div id="s5-view1"></div>
+  </div>
+  <div class="card after">
+    <div class="label">Same catalog, Notary trust ledger included</div>
+    <div id="s5-view2"></div>
+  </div>
+
+  <footer id="footer"></footer>
+</main>
+<script src="replay-data.js"></script>
+<script>
+  const d = window.REPLAY_DATA;
+  const esc = (s) => { const e = document.createElement("span"); e.textContent = s; return e.innerHTML; };
+  document.getElementById("disclosure").textContent = d.disclosure;
+  // markdown table -> html table (data is frozen and shape-known)
+  const rows = d.eval_table_markdown.split("\n").filter(l => l.startsWith("|"));
+  let html = "<table>";
+  rows.forEach((line, i) => {
+    const cells = line.split("|").slice(1, -1).map(c => c.trim());
+    if (cells.every(c => /^-+$/.test(c))) return;  // separator row
+    const tag = i === 0 ? "th" : "td";
+    html += "<tr>" + cells.map(c => `<${tag}>${esc(c.replaceAll("**", ""))}</${tag}>`).join("") + "</tr>";
+  });
+  html += "</table>";
+  document.getElementById("eval-table").innerHTML = html;
+  const footnote = d.eval_table_markdown.split("\n\n").slice(1).join(" ");
+  if (footnote) {
+    document.getElementById("eval-table").insertAdjacentHTML(
+      "beforeend", `<p class="label" style="margin-top:.5rem">${esc(footnote)}</p>`);
+  }
+  document.getElementById("before").textContent = d.before_description;
+  document.getElementById("after").textContent = d.after_description;
+  const findings = document.getElementById("findings");
+  d.findings.forEach(f => {
+    const el = document.createElement("div");
+    el.className = "card";
+    el.innerHTML =
+      `<div><span class="verdict ${esc(f.verdict)}">${esc(f.verdict)}</span>` +
+      ` <strong>${esc(f.field)}</strong>: "${esc(f.claim_text)}"</div>` +
+      `<p>${esc(f.rationale)}</p>` +
+      `<details><summary>Evidence dossier (as written to DataHub)</summary>` +
+      `<pre>${esc(f.dossier_markdown)}</pre></details>`;
+    findings.appendChild(el);
+  });
+  document.getElementById("s5-view1").textContent = d.s5.view1;
+  document.getElementById("s5-view2").textContent = d.s5.view2;
+  document.getElementById("footer").innerHTML =
+    `Run date ${esc(d.run_date)} &middot; <a href="${esc(d.repo)}">Source and local-run instructions</a>` +
+    ` &middot; Built for the DataHub Agent Hackathon.`;
+</script>
+</body>
+</html>

@@ -22,6 +22,19 @@ it writes back what it learned, so the next agent inherits verified context:
 Built for the [DataHub Agent Hackathon](https://datahub.devpost.com) (Category 1:
 Agents That Do Real Work). Apache-2.0.
 
+## Hosted replay (no setup required)
+
+**https://notary-replay.vercel.app** replays a completed Notary run: the
+honest evaluation table, the flagship cents-lie catch with its evidence
+dossier, the before/after catalog descriptions, and the next-agent answer
+flip. The page discloses that every artifact shown is a real, frozen output
+captured from that run; nothing is generated when the page loads. Regenerate
+the data yourself with:
+
+```
+python scripts/capture_replay_data.py --out web/replay-data.json
+```
+
 ## Status
 
 Under construction (submission window: through 2026-08-10). The spec that governs
