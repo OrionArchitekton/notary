@@ -734,3 +734,24 @@ def test_qualified_log_names_also_match(tmp_path):
     finally:
         ro.close()
     assert finding.verdict is Verdict.CONTRADICTED
+
+
+def test_capped_scan_cannot_confirm_percent_scale(tmp_path):
+    """PR5 cycle-3 regression (HIGH): the percent CONFIRM branch requires a
+    complete scan like every other universal claim; a capped prefix of
+    in-range values proves nothing about row 100,001."""
+    ro = _big_table(
+        tmp_path, "pcap", "create table t (p double)",
+        "insert into t select 50.0 from range(100001)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="p", claim_type=ClaimType.UNIT_SCALE,
+            text="Percent between 0 and 100.",
+            predicate={"unit": "percent_0_100"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE

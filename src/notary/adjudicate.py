@@ -64,9 +64,10 @@ def adjudicate(claim: Claim, result: ProbeResult) -> Finding:
 # confirmation is reachable, from values that actually use the percent
 # scale.
 _PERCENT_RUBRIC_TEXT = (
-    "CONFIRMED iff 0 <= min, median > 1, and max <= 100; a [0, 1]-confined "
-    "distribution is scale-ambiguous (fraction vs sub-1-percent values) and "
-    "falls to UNVERIFIABLE; contradiction is unreachable by design"
+    "CONFIRMED iff 0 <= min, median > 1, and max <= 100 over a complete "
+    "scan (under the scan limit); a [0, 1]-confined distribution is "
+    "scale-ambiguous (fraction vs sub-1-percent values) and falls to "
+    "UNVERIFIABLE; contradiction is unreachable by design"
 )
 
 
@@ -108,14 +109,16 @@ def _adjudicate_percent(claim: Claim, result: ProbeResult) -> Finding:
                 f"distribution alone; refusing to guess"
             ),
         )
-    if 0.0 <= lo and median > 1.0 and hi <= 100.0:
+    scan_limit = int(m.get("scan_limit") or 0)
+    scanned_all = scan_limit > 0 and int(row_count) < scan_limit
+    if 0.0 <= lo and median > 1.0 and hi <= 100.0 and scanned_all:
         return Finding(
             claim=claim,
             verdict=Verdict.CONFIRMED,
             evidence=evidence,
             rationale=(
                 f"value distribution matches a 0-to-100 percent: median "
-                f"{median:.2f} with max {hi:.2f}"
+                f"{median:.2f} with max {hi:.2f} over the complete table"
             ),
         )
     return Finding(

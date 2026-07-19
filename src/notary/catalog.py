@@ -271,22 +271,26 @@ class NotaryWriter:
 
             all_docs_ok = all(d["ok"] for d in receipt["documents"])
             for f in findings:
-                if (
-                    f.verdict.value == "CONTRADICTED"
-                    and f.claim.field_path
-                    and all_docs_ok
-                ):
+                if f.verdict.value == "CONTRADICTED" and all_docs_ok:
+                    # table-level contradictions (field_path None) correct
+                    # the dataset description; omitting column_path targets
+                    # the entity itself (PR5 finding: a contradicted
+                    # table-level claim must not survive in the catalog)
+                    tool_args = {
+                        "entity_urn": asset_urn,
+                        "operation": "replace",
+                        "description": _corrected_description(f, run_date),
+                    }
+                    if f.claim.field_path:
+                        tool_args["column_path"] = f.claim.field_path
                     res = await session.call_tool(
-                        "update_description",
-                        {
-                            "entity_urn": asset_urn,
-                            "operation": "replace",
-                            "column_path": f.claim.field_path,
-                            "description": _corrected_description(f, run_date),
-                        },
+                        "update_description", tool_args
                     )
                     receipt["descriptions"].append(
-                        {"field": f.claim.field_path, "ok": not res.isError}
+                        {
+                            "field": f.claim.field_path or "(table)",
+                            "ok": not res.isError,
+                        }
                     )
         return receipt
 

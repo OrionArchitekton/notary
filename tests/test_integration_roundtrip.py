@@ -312,6 +312,9 @@ def test_run_cli_clean_asset_takes_the_no_incident_path(ingested, tmp_path):
         "urn:li:dataset:(urn:li:dataPlatform:duckdb,"
         "fiction_retail.fct_refunds,PROD)"
     )
+    # idempotency: a prior run corrected the reason description in the
+    # editable overlay; reset so replay fixtures match what is read
+    _reset_editable_description(refunds, "reason", "Refund reason. Required field.")
     env = {**os.environ, "NOTARY_RUN_DATE": "2026-07-18"}
     r = subprocess.run(
         [
@@ -327,3 +330,70 @@ def test_run_cli_clean_asset_takes_the_no_incident_path(ingested, tmp_path):
     )
     assert r.returncode == 0, r.stderr
     assert "incident raised" not in r.stdout
+
+
+def _reset_table_description(urn: str, text: str) -> None:
+    q = json.dumps({
+        "query": "mutation($input: DescriptionUpdateInput!) "
+                 "{ updateDescription(input: $input) }",
+        "variables": {"input": {"description": text, "resourceUrn": urn}},
+    }).encode()
+    req = urllib.request.Request(
+        f"{GMS}/api/graphql", data=q,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        payload = json.loads(r.read())
+    assert not payload.get("errors"), payload
+
+
+def test_run_cli_table_level_deprecation_end_to_end(ingested, tmp_path):
+    """PR5 cycle-3 regressions (HIGH x2): a table-only-described asset must
+    be runnable OUTSIDE --demo (with the reduced-binding caveat), and a
+    contradicted TABLE-level claim gets its corrected description written
+    back (not just a ledger and dossier)."""
+    import os
+    import re
+    import subprocess
+    import sys
+
+    legacy = (
+        "urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+        "fiction_retail.legacy_orders_v1,PROD)"
+    )
+    lie = "DEPRECATED 2025: superseded by fct_orders. No longer used."
+    _reset_table_description(legacy, lie)
+
+    db, _, _ = ingested  # full seeded warehouse incl. query_log
+    env = {**os.environ, "NOTARY_RUN_DATE": "2026-07-18"}
+    r = subprocess.run(
+        [
+            sys.executable, "-m", "notary.run",
+            "--gms", GMS,
+            "--db", str(db),
+            "--fixtures", "tests/fixtures/llm",
+            "--asset", legacy,
+        ],
+        capture_output=True, text=True, timeout=300, env=env,
+        cwd=str(__import__("pathlib").Path(__file__).parent.parent),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "CONTRADICTED" in r.stdout
+    assert "binding evidence" in r.stdout.lower()  # reduced-binding caveat
+
+    # the corrected TABLE description is on the editable surface
+    q = json.dumps({
+        "query": 'query($urn: String!) { dataset(urn: $urn) { '
+                 'editableProperties { description } } }',
+        "variables": {"urn": legacy},
+    }).encode()
+    req = urllib.request.Request(
+        f"{GMS}/api/graphql", data=q,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        payload = json.loads(resp.read())
+    desc = payload["data"]["dataset"]["editableProperties"]["description"]
+    assert "Notary" in desc
+    # restore the planted lie for the next run
+    _reset_table_description(legacy, lie)
