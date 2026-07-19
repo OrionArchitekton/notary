@@ -28,10 +28,9 @@ def _asset(with_ledger: bool):
                 "amount: measured median 12800 with every value an integer; "
                 "consistent with integer cents. [Notary 2026-07-18]"
             ),
-            "dossier_lines": [
-                "Field: amount",
-                "Rationale: described as USD but every value is an integer",
-                "Verdict: CONTRADICTED",
+            "dossier_findings": [
+                "field=amount; verdict=CONTRADICTED; rationale=described "
+                "as USD but every value is an integer",
             ],
         }
     return asset
@@ -56,3 +55,52 @@ def test_prompt_binds_the_question_to_catalog_context_only():
     assert "ONLY" in prompt  # grounded: catalog context is the sole source
     assert "amount" in prompt
     assert "CONTRADICTED" in prompt
+
+
+def test_context_preserves_field_to_verdict_association():
+    """PR6 cycle-1 regression (HIGH): each dossier contributes ONE line
+    binding field, verdict, and rationale together; flattening into
+    independent sorted strings loses which verdict belongs to which field
+    on multi-finding assets."""
+    after = canonical_context(_asset(with_ledger=True))
+    assert "field=amount; verdict=CONTRADICTED" in after
+
+
+def test_context_normalizes_run_dates_for_replay():
+    """PR6 cycle-1 regression (P2): run-specific ISO dates would break
+    replay when the asset is re-notarized on a later date; the canonical
+    context normalizes them to a placeholder."""
+    after = canonical_context(_asset(with_ledger=True))
+    assert "2026-07-18" not in after
+    assert "<run-date>" in after
+
+
+def test_prompt_fences_catalog_text_as_untrusted_data():
+    """PR6 cycle-1 regression (adversarial HIGH): catalog-derived text is
+    mutable and can carry instruction-like content; the prompt fences it
+    as DATA and says instructions inside it are never followed."""
+    prompt = build_prompt(canonical_context(_asset(with_ledger=True)))
+    assert "BEGIN CATALOG DATA" in prompt
+    assert "END CATALOG DATA" in prompt
+    assert "not instructions" in prompt.lower()
+
+
+def test_prompt_requires_measurement_hedged_language():
+    """PR6 cycle-1 regression (HIGH): the adjudicator never asserts an
+    inferred unit as fact; the answering agent is instructed the same way
+    (state measurements; interpretations are consistent-with, not
+    established fact)."""
+    prompt = build_prompt(canonical_context(_asset(with_ledger=True)))
+    assert "consistent with" in prompt.lower()
+
+
+def test_question_binds_to_the_asset():
+    """PR6 cycle-1 regression (P2): the question names the asset actually
+    selected, not a hardcoded table."""
+    import s5_next_agent as s5
+
+    q = s5.build_question(
+        "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.stg_inventory,PROD)"
+    )
+    assert "stg_inventory" in q
+    assert "fct_payments" not in q
