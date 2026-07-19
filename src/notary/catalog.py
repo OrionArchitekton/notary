@@ -342,12 +342,23 @@ def _extract_doc_urn(res) -> str | None:
 
 def _verdict_summary(findings: list) -> str:
     """Per-claim tally so UNVERIFIABLE claims are never hidden by the
-    asset-level verdict (review finding FR15)."""
+    asset-level verdict (review finding FR15). Spec S3 says the ledger
+    records WHY a claim is unverifiable, and dossiers exist only for
+    adjudicated claims (PR8 pipeline finding), so each UNVERIFIABLE
+    finding's field and rationale ride in the summary itself."""
     from collections import Counter
 
     counts = Counter(f.verdict.value for f in findings)
     parts = [f"{n} {v}" for v, n in sorted(counts.items())]
-    return f"{len(findings)} claims: " + ", ".join(parts)
+    summary = f"{len(findings)} claims: " + ", ".join(parts)
+    reasons = [
+        f"unverifiable {f.claim.field_path or '(table)'}: {f.rationale}"
+        for f in findings
+        if f.verdict.value == "UNVERIFIABLE"
+    ]
+    if reasons:
+        summary += " | " + "; ".join(reasons)
+    return summary
 
 
 def _aggregate_verdict(findings: list) -> str:

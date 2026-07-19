@@ -164,12 +164,14 @@ def _adjudicate_unit_scale(claim: Claim, result: ProbeResult) -> Finding:
         "probe_sql": result.spec.sql,
         "rubric": _RUBRIC_TEXT,
     }
-    # Overclaim-review fix (Codex C3): both unit verdicts rest on universal
-    # distribution statements ("every value is an integer" / the dollars
-    # signature), so a scan that hit its cap yields prefix statistics that
-    # support neither; same complete-scan bar as every other universal claim.
+    # Overclaim-review fix (Codex C3) + PR8 pipeline fix: both unit verdicts
+    # rest on universal distribution statements, so a scan that hit its cap
+    # yields prefix statistics that support neither. The cap detector is
+    # rows SCANNED (raw rows read, nulls included); the non-null row_count
+    # can dip under the limit while the scan was still capped.
     scan_limit = m.get("scan_limit")
-    if scan_limit is not None and int(row_count) >= int(scan_limit):
+    rows_scanned = m.get("rows_scanned", row_count)
+    if scan_limit is not None and int(rows_scanned) >= int(scan_limit):
         return Finding(
             claim=claim,
             verdict=Verdict.UNVERIFIABLE,
