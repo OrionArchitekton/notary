@@ -477,3 +477,60 @@ def test_s5_next_agent_inherits_the_verdict(ingested, tmp_path):
     assert found, "raised incident never became query-visible for cleanup"
     resolved = close_obsolete_incident(GMS, PAYMENTS_URN, run_date="2026-07-18")
     assert resolved == found
+
+
+def test_rollback_removes_all_notary_state(ingested, tmp_path):
+    """Spec Reversibility: one command removes everything a run authored
+    (ledger, dossiers, correction, incident), restores the pre-image, and
+    a re-run afterwards recreates the state (so the demo catalog is left
+    populated for reviewers)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from notary.incidents import find_open_notary_incident, incident_title
+    from notary.rollback import _read_structured_properties
+
+    repo_root = Path(__file__).parent.parent
+    env = {**os.environ, "NOTARY_RUN_DATE": "2026-07-18"}
+    _reset_editable_description(
+        PAYMENTS_URN, "amount", "Transaction amount in USD."
+    )
+
+    def _run_cli(module, *extra):
+        return subprocess.run(
+            [sys.executable, "-m", module, "--gms", GMS,
+             "--asset", PAYMENTS_URN, *extra],
+            capture_output=True, text=True, timeout=300, env=env,
+            cwd=str(repo_root),
+        )
+
+    r = _run_cli(
+        "notary.run", "--db", str(tmp_path / "rb-wh.duckdb"),
+        "--fixtures", "tests/fixtures/llm", "--demo",
+    )
+    assert r.returncode == 0, r.stderr
+
+    rb = _run_cli("notary.rollback")
+    assert rb.returncode == 0, rb.stderr + rb.stdout
+
+    # ledger gone
+    props = _read_structured_properties(GMS, PAYMENTS_URN)
+    assert not any(u.startswith("urn:li:structuredProperty:notary.") for u in props)
+    # description restored to the pre-image
+    assert (
+        read_descriptions(GMS, PAYMENTS_URN).get("amount")
+        == "Transaction amount in USD."
+    )
+    # no open Notary incident
+    assert find_open_notary_incident(
+        GMS, PAYMENTS_URN, incident_title(PAYMENTS_URN)
+    ) is None
+
+    # leave the demo state present for reviewers
+    r2 = _run_cli(
+        "notary.run", "--db", str(tmp_path / "rb-wh2.duckdb"),
+        "--fixtures", "tests/fixtures/llm", "--demo",
+    )
+    assert r2.returncode == 0, r2.stderr

@@ -118,8 +118,11 @@ README and demo.
 - **Provenance labeling**: every catalog mutation Notary makes is attributable to
   Notary in that surface (ledger property, document authorship, description
   provenance line, incident reporter).
-- **Reversibility**: a single command removes all Notary-authored catalog state
-  (ledger properties, dossiers, incidents, description edits) for a given run.
+- **Reversibility**: a single command (`python -m notary.rollback --asset <urn>`)
+  removes all Notary-authored catalog state for an asset: ledger properties,
+  dossiers, the open Notary incident, and provenance-labeled description
+  corrections (restored to the quoted pre-image only when the current text
+  matches Notary's own correction format; foreign edits are never touched).
 - **Safety**: Notary edits only metadata surfaces, never warehouse data. Probes
   are read-only SQL with bounded scan cost.
 - **No Cloud dependency**: every surface used exists in DataHub OSS quickstart.
