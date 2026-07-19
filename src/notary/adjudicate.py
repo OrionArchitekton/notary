@@ -31,7 +31,8 @@ _RUBRIC_TEXT = (
     f"CONTRADICTED iff integer_share == {_CENTS_INTEGER_SHARE} and median > "
     f"{_CENTS_MEDIAN_FLOOR}; CONFIRMED iff fractional_share >= "
     f"{_DOLLARS_FRACTIONAL_FLOOR} and 0 < median <= {_DOLLARS_MEDIAN_CEILING}; "
-    f"otherwise UNVERIFIABLE"
+    f"otherwise UNVERIFIABLE; either verdict requires a complete scan "
+    f"(under the scan limit)"
 )
 
 
@@ -94,6 +95,7 @@ def _adjudicate_percent(claim: Claim, result: ProbeResult) -> Finding:
         "max": hi,
         "centi_integer_share": centi_share,
         "row_count": int(row_count),
+        "rows_scanned": int(m.get("rows_scanned", row_count)),
         "probe_sql": result.spec.sql,
         "rubric": _PERCENT_RUBRIC_TEXT,
     }
@@ -109,8 +111,12 @@ def _adjudicate_percent(claim: Claim, result: ProbeResult) -> Finding:
                 f"distribution alone; refusing to guess"
             ),
         )
+    # PR8 cycle-2 fix: completeness keys on rows SCANNED (raw rows read,
+    # nulls included), mirroring the USD path; the non-null row_count can
+    # dip under the limit while the scan was still capped.
     scan_limit = int(m.get("scan_limit") or 0)
-    scanned_all = scan_limit > 0 and int(row_count) < scan_limit
+    rows_scanned = int(m.get("rows_scanned", row_count))
+    scanned_all = scan_limit > 0 and rows_scanned < scan_limit
     if 0.0 <= lo and median > 1.0 and hi <= 100.0 and scanned_all:
         return Finding(
             claim=claim,
@@ -163,6 +169,23 @@ def _adjudicate_unit_scale(claim: Claim, result: ProbeResult) -> Finding:
         "probe_sql": result.spec.sql,
         "rubric": _RUBRIC_TEXT,
     }
+    # Overclaim-review fix (Codex C3) + PR8 pipeline fix: both unit verdicts
+    # rest on universal distribution statements, so a scan that hit its cap
+    # yields prefix statistics that support neither. The cap detector is
+    # rows SCANNED (raw rows read, nulls included); the non-null row_count
+    # can dip under the limit while the scan was still capped.
+    scan_limit = m.get("scan_limit")
+    rows_scanned = m.get("rows_scanned", row_count)
+    if scan_limit is not None and int(rows_scanned) >= int(scan_limit):
+        return Finding(
+            claim=claim,
+            verdict=Verdict.UNVERIFIABLE,
+            evidence=evidence,
+            rationale=(
+                f"scan capped at {int(scan_limit)} rows; prefix statistics "
+                f"cannot support a universal unit verdict; refusing to guess"
+            ),
+        )
     if integer_share == _CENTS_INTEGER_SHARE and median > _CENTS_MEDIAN_FLOOR:
         return Finding(
             claim=claim,

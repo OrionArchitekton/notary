@@ -56,22 +56,29 @@ def plan_probe(claim: Claim, as_of: str | None = None) -> ProbeSpec:
         # centi_integer_share: share of values that are exact multiples of
         # 0.01 (a 0-1-confined column of round percentages divided by 100
         # is the stored-as-fraction signature for percent claims)
+        # PR8 pipeline fix: nulls stay IN the scanned set so rows_scanned
+        # counts raw rows read (the cap detector), while the value stats
+        # skip nulls via null-safe aggregates. A null inside a full-cap
+        # prefix previously shrank the post-filter count under the limit
+        # and defeated the complete-scan guard.
         sql = (
             f'select median(v) as median, '
-            f'avg(case when v = floor(v) then 1.0 else 0.0 end) as integer_share, '
-            f'avg(case when v * 100 = floor(v * 100) then 1.0 else 0.0 end) '
+            f'avg(case when v is null then null '
+            f'when v = floor(v) then 1.0 else 0.0 end) as integer_share, '
+            f'avg(case when v is null then null '
+            f'when v * 100 = floor(v * 100) then 1.0 else 0.0 end) '
             f'as centi_integer_share, '
-            f'min(v) as min, max(v) as max, count(*) as row_count, '
+            f'min(v) as min, max(v) as max, count(v) as row_count, '
+            f'count(*) as rows_scanned, '
             f'{SCAN_LIMIT} as scan_limit '
-            f'from (select "{col}" as v from "{table}" limit {SCAN_LIMIT}) '
-            f'where v is not null'
+            f'from (select "{col}" as v from "{table}" limit {SCAN_LIMIT})'
         )
         return ProbeSpec(
             claim=claim,
             sql=sql,
             measure_keys=(
                 "median", "integer_share", "centi_integer_share",
-                "min", "max", "row_count", "scan_limit",
+                "min", "max", "row_count", "rows_scanned", "scan_limit",
             ),
         )
     if claim.claim_type is ClaimType.COMPLETENESS and claim.field_path:

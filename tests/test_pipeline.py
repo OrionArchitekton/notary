@@ -451,7 +451,15 @@ def test_probe_scans_bound_rows_before_null_filter():
         field_path="qty", claim_type=ClaimType.DOMAIN_ENUM,
         text="Non-negative.", predicate={"min": 0},
     )
-    for claim in (unit, enum, bound):
+    # The unit probe now keeps nulls IN the bounded scan (rows_scanned is
+    # the cap detector) and skips them via null-safe aggregates instead of
+    # an outer filter; the bounded-read invariant is unchanged.
+    unit_sql = plan_probe(unit).sql.lower()
+    assert "limit" in unit_sql
+    assert "count(*) as rows_scanned" in unit_sql
+    assert "case when v is null then null" in unit_sql
+    assert "is not null" not in unit_sql, unit_sql
+    for claim in (enum, bound):
         sql = plan_probe(claim).sql.lower()
         assert "is not null" in sql
         assert sql.index("limit") < sql.index("is not null"), sql
@@ -734,6 +742,96 @@ def test_qualified_log_names_also_match(tmp_path):
     finally:
         ro.close()
     assert finding.verdict is Verdict.CONTRADICTED
+
+
+def test_capped_scan_cannot_contradict_usd_cents(tmp_path):
+    """Overclaim-review fix (Codex C3): the cents CONTRADICTION asserts
+    "every value is an integer", a universal statement, so a capped prefix
+    cannot support it; when the scan hits its cap the USD rubric falls to
+    UNVERIFIABLE instead of contradicting from prefix statistics."""
+    ro = _big_table(
+        tmp_path, "ucap1", "create table t (v bigint)",
+        "insert into t select 12795 from range(100001)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="v", claim_type=ClaimType.UNIT_SCALE,
+            text="Transaction amount in USD.",
+            predicate={"unit": "USD"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_null_in_capped_prefix_cannot_hide_the_cap(tmp_path):
+    """PR8 pipeline fix (both engines, HIGH): the completeness guard must
+    key on rows SCANNED, not non-null values measured. One null inside a
+    full-cap prefix previously made row_count dip under the limit and
+    re-opened the universal-verdict path from prefix statistics."""
+    ro = _big_table(
+        tmp_path, "ucap3", "create table t (v double)",
+        "insert into t values (NULL); "
+        "insert into t select 12795 from range(99999); "
+        "insert into t values (12795.5)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="v", claim_type=ClaimType.UNIT_SCALE,
+            text="Transaction amount in USD.",
+            predicate={"unit": "USD"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_capped_scan_cannot_confirm_usd_dollars(tmp_path):
+    """Same gate, confirm side: a plausible-dollars PREFIX cannot confirm
+    the unit claim for rows beyond the cap."""
+    ro = _big_table(
+        tmp_path, "ucap2", "create table t (v double)",
+        "insert into t select 19.99 + (random() * 0.5) from range(100001)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="v", claim_type=ClaimType.UNIT_SCALE,
+            text="List price in USD.",
+            predicate={"unit": "USD"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
+
+
+def test_null_in_capped_prefix_cannot_confirm_percent(tmp_path):
+    """PR8 cycle-2 fix (Codex HIGH): the percent CONFIRM path must key scan
+    completeness on rows SCANNED, not the non-null count; a null inside a
+    full-cap prefix previously read as a complete scan and confirmed from
+    prefix statistics while an out-of-range value sat beyond the cap."""
+    ro = _big_table(
+        tmp_path, "pcap2", "create table t (p double)",
+        "insert into t values (NULL); "
+        "insert into t select 50.0 from range(99999); "
+        "insert into t values (200.0)",
+    )
+    try:
+        claim = Claim(
+            asset_urn="urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.t,PROD)",
+            field_path="p", claim_type=ClaimType.UNIT_SCALE,
+            text="Percent between 0 and 100.",
+            predicate={"unit": "percent_0_100"},
+        )
+        finding = adjudicate(claim, run_probe(plan_probe(claim), ro))
+    finally:
+        ro.close()
+    assert finding.verdict is Verdict.UNVERIFIABLE
 
 
 def test_capped_scan_cannot_confirm_percent_scale(tmp_path):

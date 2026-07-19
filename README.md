@@ -4,32 +4,36 @@
 measured reality, and writes the verdicts back into the catalog.**
 
 A column says "transaction amount in USD" but stores integer cents. An agent
-grounded on that catalog quotes revenue 100x off, with the catalog's authority
-behind it. Catalogs accumulate claims (units, freshness, completeness, enums,
-deprecation) and nothing checks whether they are still true.
+grounded on that catalog can quote revenue 100x off, with the catalog's
+authority behind it. Catalogs accumulate claims (units, freshness,
+completeness, enums, deprecation) and nothing checks whether they are still
+true.
 
-Notary reads an asset's claims from [DataHub](https://datahub.com) through the
-MCP Server, probes the warehouse with deterministic SQL, and adjudicates each
-claim: **CONFIRMED**, **CONTRADICTED**, or **UNVERIFIABLE**, with evidence. Then
-it writes back what it learned, so the next agent inherits verified context:
+Notary reads an asset's live descriptions from [DataHub](https://datahub.com)
+(GraphQL), probes the warehouse with deterministic SQL, and adjudicates every
+extracted claim: **CONFIRMED**, **CONTRADICTED**, or **UNVERIFIABLE**, with
+evidence. Then it writes back what it learned through the DataHub MCP Server,
+so the next agent inherits verified context:
 
 - a **trust ledger** on the asset (structured properties: verdict, verified-at,
   evidence link)
 - an **evidence dossier** (the probe SQL, the measured value, the claim diff)
 - a **corrected description** with labeled provenance
-- an **incident** on assets whose context is dangerously wrong
+- an **incident** (GraphQL) on assets whose context is dangerously wrong
 
 Built for the [DataHub Agent Hackathon](https://datahub.devpost.com) (Category 1:
 Agents That Do Real Work). Apache-2.0.
 
 ## Hosted replay (no setup required)
 
-**https://notary-replay.vercel.app** replays a completed Notary run: the
+**https://notary-replay.vercel.app** replays the recorded demo run: the
 honest evaluation table, the flagship cents-lie catch with its evidence
 dossier, the before/after catalog descriptions, and the next-agent answer
-flip. The page discloses that every artifact shown is a real, frozen output
-captured from that run; nothing is generated when the page loads. Regenerate
-the data yourself with:
+flip. The page is a frozen, reproducible bundle assembled from that run's
+inputs (the seeded warehouse, the captured Claude extractions, Notary's own
+write-back formatters, and the separately captured next-agent answers, which
+are prompt-bound to this evaluation's evidence); nothing is generated when
+the page loads, and the page says so. Regenerate the data yourself with:
 
 ```
 python scripts/capture_replay_data.py --out web/replay-data.json
@@ -37,8 +41,11 @@ python scripts/capture_replay_data.py --out web/replay-data.json
 
 ## Status
 
-Under construction (submission window: through 2026-08-10). The spec that governs
-this build: [specs/notary-spec.md](specs/notary-spec.md).
+Feature-complete: all seven scenarios of the governing spec
+([specs/notary-spec.md](specs/notary-spec.md)) are demonstrated by the test
+suite; 8 tests are live DataHub integration round-trips (skipped without a
+local quickstart), the rest are deterministic replay and evaluation tests.
+Built for the DataHub Agent Hackathon (submission window through 2026-08-10).
 
 ## Honest evaluation
 
@@ -142,9 +149,10 @@ replays the captured completions by default (pass `--live` with an
    requires an absent `--db` path; `NOTARY_RUN_DATE` is required because
    Notary never reads the wall clock.
 
-5. Watch the next agent flip (the S5 scenario): a stock catalog-grounded
-   agent reads the same asset through the DataHub MCP server, once with
-   the trust ledger withheld and once with it included:
+5. Watch the next agent flip (the S5 scenario): a minimal catalog-grounded
+   agent reads the asset through the stock DataHub MCP tools, then answers
+   the same question twice, once from a view with Notary's data withheld
+   and once from the full catalog view:
 
    ```
    .venv/bin/python scripts/s5_next_agent.py

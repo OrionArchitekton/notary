@@ -37,11 +37,13 @@ FLAGSHIP_URN = (
 )
 
 DISCLOSURE = (
-    "This page replays a CAPTURED Notary run from the seeded demo warehouse "
-    "(run date 2026-07-18). Every verdict, measurement, dossier, and agent "
-    "answer shown is a real, frozen artifact produced by that run; nothing "
-    "is generated when this page loads. Full local-run instructions live in "
-    "the repository README."
+    "This page is a frozen, reproducible replay of the recorded demo run "
+    "(run date 2026-07-18), assembled from that run's inputs: the seeded "
+    "demo warehouse, the captured Claude extractions (replayed verbatim), "
+    "and Notary's own write-back formatters, plus two separately captured "
+    "agent answers that are prompt-bound to this evaluation's evidence. "
+    "Nothing is generated when this page loads. Full local-run instructions "
+    "live in the repository README."
 )
 
 

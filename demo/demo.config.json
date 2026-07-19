@@ -1,0 +1,17 @@
+{
+  "script": "/home/orion/.worktrees/codex/notary-demo-video/demo/DEMO_SCRIPT.md",
+  "dashboardBaseUrl": "https://notary-replay.vercel.app",
+  "out": "/home/orion/.worktrees/codex/notary-demo-video/demo/out",
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "fps": 30,
+  "voice": {
+    "seed": 4471
+  },
+  "theme": {
+    "captionSize": 11,
+    "captionMarginV": 14
+  }
+}

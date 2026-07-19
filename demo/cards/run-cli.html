@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>notary run</title>
+<style>
+  body {
+    margin: 0; background: #101418; color: #d8dee6;
+    font: 17px/1.7 "Cascadia Code", "Fira Code", ui-monospace, monospace;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh;
+  }
+  .term {
+    width: 1500px; background: #0b0e11; border: 1px solid #232a33;
+    border-radius: 12px; box-shadow: 0 24px 80px rgba(0,0,0,.55);
+    overflow: hidden;
+  }
+  .bar { background: #161b21; padding: 10px 16px; display: flex; gap: 8px; align-items: center; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .bar span.title { margin-left: 10px; color: #7d8896; font-size: 13px; }
+  pre { margin: 0; padding: 26px 30px 30px; white-space: pre-wrap; word-break: break-all; }
+  .p { color: #8fb4d8; }
+  .cmd { color: #e8e6e1; }
+  .dim { color: #7d8896; }
+  .bad { color: #ff6b60; font-weight: 700; }
+  .good { color: #57c07a; font-weight: 700; }
+  .note {
+    padding: 10px 30px 18px; color: #66707c; font-size: 12.5px;
+    border-top: 1px solid #1a2027;
+  }
+</style>
+</head>
+<body>
+<div class="term">
+  <div class="bar">
+    <div class="dot" style="background:#ff5f57"></div>
+    <div class="dot" style="background:#febc2e"></div>
+    <div class="dot" style="background:#28c840"></div>
+    <span class="title">notary: demo warehouse, local DataHub quickstart</span>
+  </div>
+  <pre><span class="p">$</span> <span class="cmd">NOTARY_RUN_DATE=2026-07-18 python -m notary.run \
+    --asset 'urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)' \
+    --demo --db .notary/run-wh.duckdb</span>
+<span class="dim">reading live catalog descriptions for urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)
+2 described field(s), 2 claim(s) survived the extraction gates</span>
+  <span class="bad">CONTRADICTED</span>  amount: described as USD but every value is an integer with median 12795; consistent with integer cents, not dollars
+  <span class="good">CONFIRMED</span>     currency: complete distinct set ['EUR', 'GBP', 'USD'] over all 2000 rows sits inside the claimed set
+<span class="dim">write-back:</span> ledger=True dossiers=2/2 descriptions=1/1
+<span class="dim">incident raised:</span> urn:li:incident:2dd2d2f9-f491-4184-81b9-dd195d3f9175</pre>
+  <div class="note">Verbatim stdout lines of the demo run recorded for this video (2026-07-18); raw transcript with server log lines: demo/captures/run-cli-2026-07-18.txt in the repository. Replaying captured Claude extractions against the seeded warehouse and a local DataHub quickstart.</div>
+</div>
+</body>
+</html>

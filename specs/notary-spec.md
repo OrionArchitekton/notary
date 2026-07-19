@@ -61,9 +61,14 @@ Acceptance: a catalog reader can see verdict, evidence, and corrected text on th
 asset without leaving the catalog UI.
 
 ### S2. The honest confirmation
-A column described "ISO-3166 alpha-2 country code" whose values all match the
-enum. Verdict CONFIRMED; ledger entry written; the description is NOT modified.
-Acceptance: confirmed assets gain a verified badge and nothing else changes.
+A column with a truthful enum description whose values all match the claimed
+set (demonstrated with "ISO-4217 currency code"; the originally chosen
+ISO-3166 country-code column's extraction prompt is provider-blocked, so that
+entry is scored fail-closed as unscored in the evaluation instead). Verdict
+CONFIRMED; ledger entry written; the description is NOT modified.
+Acceptance: confirmed assets gain a verified badge backed by an evidence
+dossier recording the probe and measurements; the description is not
+modified and no incident is raised.
 
 ### S3. Fail-closed on the unverifiable
 A claim Notary cannot probe (e.g. "sourced from the billing system") returns
@@ -75,7 +80,9 @@ UNVERIFIABLE never counts toward "lies caught" in any surfaced metric.
 A CONTRADICTED verdict whose blast radius qualifies as dangerous (unit/scale lies
 on high-usage assets in v1) raises a catalog incident on the asset naming the
 claim, the evidence, and the affected-usage summary. Acceptance: the incident is
-visible on the asset in the catalog UI with Notary named as reporter.
+visible on the asset in the catalog UI and attributable to Notary by name in
+that surface (title-borne; the OSS raiseIncident input carries no reporter
+identity field, so the API-authenticated caller remains the creator).
 
 ### S5. The next agent inherits the verdict
 After a Notary run, a second, independent agent session reading the same asset
