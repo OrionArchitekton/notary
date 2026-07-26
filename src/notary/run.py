@@ -82,6 +82,37 @@ def receipt_ok(receipt: dict) -> bool:
     return True
 
 
+def expected_upstream_urn(asset_urn: str, reference_table: str) -> str | None:
+    """The dataset urn a declared reconciliation reference MUST resolve to,
+    derived from the suspect asset. Shared by the live gate and the replay
+    capture so neither reimplements it: a second copy would drift from the
+    resolver it is meant to guard, and a checker that instead compared a
+    receipt's own `expected_upstream_urn` against its own `upstream_urn`
+    would let a doctored receipt grade itself (review finding, PR #13).
+
+    Returns None when the asset urn does not parse."""
+    import re as _re
+
+    m = _re.match(
+        r"urn:li:dataset:\(urn:li:dataPlatform:([^,]+),([^,]+),([A-Z]+)\)$",
+        asset_urn,
+    )
+    if not m:
+        return None
+    platform, name, env = m.groups()
+    # A qualified reference name is taken as-is; a bare one inherits the
+    # suspect's schema prefix, and a prefix exists only when the suspect
+    # name is itself qualified (PR #11 finding: unconditional rsplit
+    # mangled unqualified names).
+    if "." in reference_table:
+        ref_name = reference_table
+    elif "." in name:
+        ref_name = f"{name.rsplit('.', 1)[0]}.{reference_table}"
+    else:
+        ref_name = reference_table
+    return f"urn:li:dataset:(urn:li:dataPlatform:{platform},{ref_name},{env})"
+
+
 def lineage_verified_upstream(
     gms_url: str, asset_urn: str, reference_table: str, upstream_reader=None
 ) -> tuple[bool, str, dict]:
@@ -96,8 +127,6 @@ def lineage_verified_upstream(
     verdict gate is load-bearing MCP rather than a side channel, and the
     returned RECEIPT (tool, transport, asset, matched upstream) travels
     into the evidence dossier as proof of how the gate was satisfied."""
-    import re as _re
-
     reader = upstream_reader or mcp_upstream_urns
     # The receipt states exactly what the read enforced, no more (review
     # finding: an evidence reader must not infer stronger edge semantics
@@ -113,27 +142,10 @@ def lineage_verified_upstream(
         "verified": False,
     }
 
-    m = _re.match(
-        r"urn:li:dataset:\(urn:li:dataPlatform:([^,]+),([^,]+),([A-Z]+)\)$",
-        asset_urn,
-    )
-    if not m:
+    ref_urn = expected_upstream_urn(asset_urn, reference_table)
+    if ref_urn is None:
         receipt["error"] = f"cannot parse asset urn {asset_urn!r}"
         return False, f"refused: cannot parse asset urn {asset_urn!r}", receipt
-    platform, name, env = m.groups()
-    # A qualified reference name is taken as-is; a bare one inherits the
-    # suspect's schema prefix, and a prefix exists only when the suspect
-    # name is itself qualified (PR #11 finding: unconditional rsplit
-    # mangled unqualified names).
-    if "." in reference_table:
-        ref_name = reference_table
-    elif "." in name:
-        ref_name = f"{name.rsplit('.', 1)[0]}.{reference_table}"
-    else:
-        ref_name = reference_table
-    ref_urn = (
-        f"urn:li:dataset:(urn:li:dataPlatform:{platform},{ref_name},{env})"
-    )
     receipt["expected_upstream_urn"] = ref_urn
     if ref_urn == asset_urn:
         # A self-edge in the catalog proves nothing about independence

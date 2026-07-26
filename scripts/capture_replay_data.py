@@ -25,6 +25,7 @@ from notary.catalog import _corrected_description, _dossier_markdown  # noqa: E4
 from notary.demo.seeder import ANCHOR_DATE, DEFAULT_SEED, MANIFEST, build_warehouse  # noqa: E402
 from notary.eval import evaluate, missing_fixtures, unexpected_failures  # noqa: E402
 from notary.extract import ReplayLLM, _prompt_key  # noqa: E402
+from notary.run import expected_upstream_urn  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -66,6 +67,13 @@ def _lineage_receipt(path: str, flagship) -> dict:
     receipt = json.loads(Path(path).read_text())
     reference = receipt.get("reference_table")
     probe_sql = flagship.evidence.get("probe_sql", "")
+    # Derive the upstream THIS run requires from the flagship asset and the
+    # reference, through the same resolver the live gate uses. Comparing the
+    # receipt's own two urn fields to each other would let a doctored receipt
+    # that moved both together grade itself (review finding, PR #13).
+    derived = (
+        expected_upstream_urn(FLAGSHIP_URN, reference) if reference else None
+    )
     checks = {
         "is a get_lineage read over MCP": (
             receipt.get("tool") == "get_lineage"
@@ -75,9 +83,9 @@ def _lineage_receipt(path: str, flagship) -> dict:
         "reads THIS run's flagship asset": (
             receipt.get("asset_urn") == FLAGSHIP_URN
         ),
-        "matched the upstream it expected": bool(
-            receipt.get("upstream_urn")
-        ) and receipt["upstream_urn"] == receipt.get("expected_upstream_urn"),
+        "matched the upstream THIS run requires": bool(derived)
+        and receipt.get("upstream_urn") == derived
+        and receipt.get("expected_upstream_urn") == derived,
         "names the reference THIS run probed": (
             bool(reference) and reference in probe_sql
         ),

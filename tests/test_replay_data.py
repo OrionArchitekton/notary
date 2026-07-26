@@ -257,6 +257,18 @@ def test_capture_rejects_a_stale_or_non_authorizing_lineage_receipt(tmp_path):
                 "billing_invoices", "dim_customers"
             ),
         },
+        # self-consistent but wrong: comparing two fields of the receipt to
+        # each other trusts the artifact to grade itself, so both moving
+        # together must not pass (review finding, PR #13)
+        "names an unrelated upstream in BOTH fields": {
+            **good,
+            "upstream_urn": good["expected_upstream_urn"].replace(
+                "billing_invoices", "dim_customers"
+            ),
+            "expected_upstream_urn": good["expected_upstream_urn"].replace(
+                "billing_invoices", "dim_customers"
+            ),
+        },
     }
     for label, receipt in doctored.items():
         path = tmp_path / "receipt.json"
