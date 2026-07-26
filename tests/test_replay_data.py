@@ -257,6 +257,19 @@ def test_capture_rejects_a_stale_or_non_authorizing_lineage_receipt(tmp_path):
                 "billing_invoices", "dim_customers"
             ),
         },
+        # a SUBSTRING of the real reference, with the urns re-derived to
+        # match it, defeats any check that asks whether the reference merely
+        # appears somewhere in the probe SQL (review finding, PR #13)
+        "names a substring of the real reference": {
+            **good,
+            "reference_table": "invoices",
+            "upstream_urn": good["expected_upstream_urn"].replace(
+                "billing_invoices", "invoices"
+            ),
+            "expected_upstream_urn": good["expected_upstream_urn"].replace(
+                "billing_invoices", "invoices"
+            ),
+        },
         # self-consistent but wrong: comparing two fields of the receipt to
         # each other trusts the artifact to grade itself, so both moving
         # together must not pass (review finding, PR #13)

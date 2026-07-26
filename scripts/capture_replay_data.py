@@ -67,12 +67,18 @@ def _lineage_receipt(path: str, flagship) -> dict:
     receipt = json.loads(Path(path).read_text())
     reference = receipt.get("reference_table")
     probe_sql = flagship.evidence.get("probe_sql", "")
-    # Derive the upstream THIS run requires from the flagship asset and the
-    # reference, through the same resolver the live gate uses. Comparing the
-    # receipt's own two urn fields to each other would let a doctored receipt
-    # that moved both together grade itself (review finding, PR #13).
+    # Take the required reference from the MANIFEST this run evaluated, and
+    # derive the required upstream from THAT, so nothing the receipt carries
+    # can influence what it is checked against. Deriving from the receipt's
+    # own reference let a doctored one name a SUBSTRING of the real table
+    # ("invoices" inside "billing_invoices"), re-derive both urn fields to
+    # match it, and pass every check (review finding, PR #13).
+    recon = MANIFEST.reconciliations.get((PAYMENTS_TABLE, "amount"))
+    required_reference = recon.table if recon else None
     derived = (
-        expected_upstream_urn(FLAGSHIP_URN, reference) if reference else None
+        expected_upstream_urn(FLAGSHIP_URN, required_reference)
+        if required_reference
+        else None
     )
     checks = {
         "is a get_lineage read over MCP": (
@@ -86,8 +92,15 @@ def _lineage_receipt(path: str, flagship) -> dict:
         "matched the upstream THIS run requires": bool(derived)
         and receipt.get("upstream_urn") == derived
         and receipt.get("expected_upstream_urn") == derived,
-        "names the reference THIS run probed": (
-            bool(reference) and reference in probe_sql
+        "names the reference THIS run reconciled against": (
+            required_reference is not None and reference == required_reference
+        ),
+        # and that reference must really appear in this run's probe, as a
+        # QUOTED identifier: bare substring membership matched a fake
+        # reference nested inside the real table name
+        "probed that reference in THIS run": (
+            bool(required_reference)
+            and f'"{required_reference}"' in probe_sql
         ),
     }
     failed = [name for name, ok in checks.items() if not ok]
