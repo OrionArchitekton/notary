@@ -1,0 +1,13 @@
+{
+ "asset_urn": "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.fct_payments,PROD)",
+ "expected_upstream_urn": "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.billing_invoices,PROD)",
+ "matched_via": "upstreams.searchResults[].entity.urn",
+ "max_hops": 1,
+ "max_results": 200,
+ "reference_table": "billing_invoices",
+ "tool": "get_lineage",
+ "transport": "mcp",
+ "upstream_urn": "urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.billing_invoices,PROD)",
+ "upstreams_seen": 1,
+ "verified": true
+}

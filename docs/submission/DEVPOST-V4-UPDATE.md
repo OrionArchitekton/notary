@@ -57,7 +57,9 @@ ADD after the sentence describing the verification loop:
     source to be a real upstream. That MCP receipt is written into the evidence
     dossier, and a failed read, a self-reference, or a possibly-truncated result
     all refuse rather than fall back to another transport. The same agent that
-    writes through MCP now reads its gating evidence through MCP.
+    writes through MCP now reads its gating evidence through MCP. The receipt is
+    visible on the hosted replay: open the flagship finding's evidence dossier
+    and read the lineage_gate block.
 
 ## 4. Test count
 
@@ -73,14 +75,30 @@ At paste time, at the freeze SHA:
    it (`datahub docker quickstart`) or paste the numbers recorded in
    `docs/live-test-receipt.md`, which were captured with it running.
 2. Run `pytest -q` and read the summary line.
-   - Expected with the quickstart up: `166 passed` and **no** skips.
+   - Expected with the quickstart up: `168 passed` and **no** skips.
    - Without it, the live module skips at import (`allow_module_level=True`),
-     so the summary reads `156 passed, 1 skipped`: one SKIPPED MODULE, not 10
-     skipped tests. Do NOT paste 156, and do not read "1 skipped" as "only one
+     so the summary reads `158 passed, 1 skipped`: one SKIPPED MODULE, not 10
+     skipped tests. Do NOT paste 158, and do not read "1 skipped" as "only one
      test missing"; fix step 1 first.
 3. Paste the passed count verbatim. Do not paste a remembered number.
 
-## 5. Form check (the connector cannot read saved answers)
+## 5. Gallery re-upload (the live images were captured before the last two PRs)
+
+The gallery images were captured 2026-07-18 and show the OLD scorecard: 4
+controls and 17 entries, against the 6 and 19 the live replay now shows. A judge
+comparing the gallery to the page sees a contradiction.
+
+Re-upload these from `docs/screenshots/` (captions in SCREENSHOT_CAPTIONS.md):
+
+- `01-replay-hero.png`, `05-s5-flip.png`, `06-honest-table.png` (regenerated)
+- `07-mcp-lineage-receipt.png` (NEW, add last): the evidence dossier showing the
+  stock `get_lineage` receipt with `verified: true` next to the 2000/2000 key
+  reconciliation. This is the strongest single Use-of-DataHub image in the set.
+
+`02-run-cli.png`, `03-datahub-schema.png` and `04-datahub-incident.png` are
+unchanged and do not need re-uploading.
+
+## 6. Form check (the connector cannot read saved answers)
 
 Already verified 2026-07-20 and unchanged since: category "Agents That Do Real
 Work", DataHub OSS/Core + MCP Server, OSS contribution #139/#140, artifacts link

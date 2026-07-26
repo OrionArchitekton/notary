@@ -47,6 +47,50 @@ DISCLOSURE = (
 )
 
 
+LINEAGE_RECEIPT = "tests/fixtures/lineage/flagship-lineage-receipt.json"
+
+
+def _lineage_receipt(path: str, flagship) -> dict:
+    """The captured MCP `get_lineage` receipt that AUTHORIZED the flagship
+    contradiction, replayed verbatim. Same contract as the captured
+    completions: a real read, frozen once by
+    scripts/capture_lineage_receipt.py, never re-issued at page-build time
+    (so two builds stay byte-identical and the page builds without a
+    quickstart).
+
+    Fail-closed like _s5_views: the receipt must be a VERIFIED read of THIS
+    run's flagship asset whose matched upstream is the reconciliation
+    reference THIS run actually probed. An unverified receipt, one for
+    another asset, or one naming a reference this run never touched is a
+    stale capture and aborts before any output is written."""
+    receipt = json.loads(Path(path).read_text())
+    reference = receipt.get("reference_table")
+    probe_sql = flagship.evidence.get("probe_sql", "")
+    checks = {
+        "is a get_lineage read over MCP": (
+            receipt.get("tool") == "get_lineage"
+            and receipt.get("transport") == "mcp"
+        ),
+        "verified (authorized the verdict)": receipt.get("verified") is True,
+        "reads THIS run's flagship asset": (
+            receipt.get("asset_urn") == FLAGSHIP_URN
+        ),
+        "matched the upstream it expected": bool(
+            receipt.get("upstream_urn")
+        ) and receipt["upstream_urn"] == receipt.get("expected_upstream_urn"),
+        "names the reference THIS run probed": (
+            bool(reference) and reference in probe_sql
+        ),
+    }
+    failed = [name for name, ok in checks.items() if not ok]
+    if failed:
+        raise ValueError(
+            f"captured lineage receipt {path} cannot be published beside "
+            f"this run; it is not: {'; '.join(failed)}"
+        )
+    return receipt
+
+
 def _s5_views(fixtures_dir: str, required_view2: tuple[str, ...] = ()) -> dict:
     """Select the two S5 answer captures, fail-closed (pipeline findings:
     the free-form note plus a substring was the only selector, so a copied
@@ -108,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="web/replay-data.json")
     parser.add_argument("--db", default=".notary/replay-wh.duckdb")
     parser.add_argument("--fixtures", default="tests/fixtures/llm")
+    parser.add_argument("--lineage-receipt", default=LINEAGE_RECEIPT)
     args = parser.parse_args(argv)
 
     # Same fail-closed gates as notary.eval.main (pipeline finding: without
@@ -151,12 +196,29 @@ def main(argv: list[str] | None = None) -> int:
     }
     before = payments["amount"].description
 
+    entries = [r for r in report.entries if r.entry.table == PAYMENTS_TABLE]
+    flagship = None
+    for r in entries:
+        for f in r.findings:
+            if f.verdict.value == "CONTRADICTED" and f.claim.field_path == "amount":
+                flagship = f
+    if flagship is None:
+        raise RuntimeError("the flagship cents lie was not contradicted")
+
+    # The MCP read that authorized this contradiction rides in the SAME
+    # evidence dict the dossier renders, so the hosted page shows the
+    # DataHub read behind the verdict, not just the verdict.
+    try:
+        flagship.evidence["lineage_gate"] = _lineage_receipt(
+            args.lineage_receipt, flagship
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 4
+
     findings_out = []
     after_description = None
-    flagship = None
-    for r in report.entries:
-        if r.entry.table != PAYMENTS_TABLE:
-            continue
+    for r in entries:
         for f in r.findings:
             item = {
                 "field": f.claim.field_path or "(table)",
@@ -169,11 +231,22 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             }
             findings_out.append(item)
-            if f.verdict.value == "CONTRADICTED" and f.claim.field_path == "amount":
+            if f is flagship:
                 after_description = _corrected_description(f, ANCHOR_DATE)
-                flagship = f
-    if after_description is None or flagship is None:
+    if after_description is None:
         raise RuntimeError("the flagship cents lie was not contradicted")
+
+    # Positive proof the receipt reached the page a judge reads, not merely
+    # that no validation raised on the way there.
+    published = next(i for i in findings_out if i["field"] == "amount")
+    if '"lineage_gate"' not in published["dossier_markdown"]:
+        print(
+            "error: the flagship dossier does not carry the lineage "
+            "receipt; refusing to publish a replay that claims an MCP-gated "
+            "verdict without showing the read",
+            file=sys.stderr,
+        )
+        return 5
 
     # The S5 view2 prompt embeds the catalog context its answer was captured
     # against; this run's flagship dossier line must appear in it verbatim
