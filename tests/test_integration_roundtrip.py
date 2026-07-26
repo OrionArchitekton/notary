@@ -292,9 +292,25 @@ def test_obsolete_incident_is_resolved_by_a_clean_run(ingested):
         close_obsolete_incident,
         draft_incident,
         find_open_notary_incident,
+        incident_title,
         raise_incident_idempotent,
+        resolve_incident,
     )
     from notary.extract import ReplayLLM
+
+    # Start from a known state. This test asserts that a SECOND close finds
+    # nothing left, which is a real idempotency property, but the assertion
+    # is global: any Notary incident left active on this asset by another
+    # test, or by a manual run against the shared quickstart, fails it for
+    # reasons unrelated to the behavior under test. Drain first so the
+    # assertion keeps its strength without being order-dependent.
+    for _ in range(20):
+        stale = find_open_notary_incident(
+            GMS, PAYMENTS_URN, incident_title(PAYMENTS_URN)
+        )
+        if stale is None:
+            break
+        resolve_incident(GMS, stale, note="Test setup: drain pre-existing")
 
     db, _, _ = ingested
     con = duckdb.connect(str(db), read_only=True)

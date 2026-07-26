@@ -173,10 +173,34 @@ def mcp_upstream_urns(gms_url: str, asset_urn: str) -> list[str]:
                     f"get_lineage 'upstreams' carried no searchResults list "
                     f"for {asset_urn}"
                 )
-            for entry in results:
-                entity = (entry or {}).get("entity") if isinstance(entry, dict) else None
-                urn = (entity or {}).get("urn") if isinstance(entity, dict) else None
-                if isinstance(urn, str) and urn.startswith("urn:li:dataset:"):
+            # A MALFORMED entry invalidates the whole read (review finding):
+            # skipping it would let a partially valid payload authorize a
+            # contradiction. A WELL-FORMED entry that simply is not a dataset
+            # (this tool also returns charts, dashboards, and schema fields)
+            # is skipped, since refusing on those would break legitimate
+            # mixed-entity lineage.
+            for position, entry in enumerate(results):
+                if not isinstance(entry, dict):
+                    raise RuntimeError(
+                        f"get_lineage searchResults[{position}] is malformed "
+                        f"({type(entry).__name__}) for {asset_urn}; refusing "
+                        f"a partially valid lineage read"
+                    )
+                entity = entry.get("entity")
+                if not isinstance(entity, dict):
+                    raise RuntimeError(
+                        f"get_lineage searchResults[{position}] is malformed: no "
+                        f"entity object for {asset_urn}; refusing a partially "
+                        f"valid lineage read"
+                    )
+                urn = entity.get("urn")
+                if not isinstance(urn, str) or not urn.startswith("urn:li:"):
+                    raise RuntimeError(
+                        f"get_lineage searchResults[{position}] is malformed: no "
+                        f"usable entity urn for {asset_urn}; refusing a "
+                        f"partially valid lineage read"
+                    )
+                if urn.startswith("urn:li:dataset:"):
                     urns.append(urn)
             # Truncation: the server states it explicitly via hasMore, which
             # is authoritative. The raw-count check stays as a backstop, and

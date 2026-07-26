@@ -594,3 +594,41 @@ def test_receipt_states_only_what_the_read_enforced():
     # a refusal must never look verified
     assert receipt2["verified"] is False
     assert "upstream_urn" not in receipt2
+
+
+def test_malformed_search_result_entry_invalidates_the_whole_read(monkeypatch):
+    """Codex P1 on the head commit: silently skipping a malformed entry and
+    returning the rest lets a PARTIALLY VALID payload authorize a
+    CONTRADICTED verdict. In a fail-closed gate an unparseable entry must
+    invalidate the entire read."""
+    import notary.catalog as cat
+    import pytest as _pytest
+
+    for bad in (None, "not-an-object", {"entity": None},
+                {"entity": {"urn": 12345}}, {"no_entity": True}):
+        payload = {"upstreams": {
+            "total": 2, "hasMore": False,
+            "searchResults": [{"entity": {"urn": _BILL_U}, "degree": 1}, bad],
+        }}
+        _lineage_session(monkeypatch, payload)
+        with _pytest.raises(RuntimeError, match="malformed"):
+            cat.mcp_upstream_urns("http://gms", _ASSET_U)
+
+
+def test_wellformed_non_dataset_entity_is_skipped_not_refused(monkeypatch):
+    """The same tool returns lineage for charts, dashboards, and schema
+    fields. Those entries are WELL FORMED, merely not datasets, so they
+    must be skipped rather than invalidating an otherwise valid read (a
+    blanket refusal here would break legitimate mixed-entity lineage)."""
+    import notary.catalog as cat
+
+    payload = {"upstreams": {
+        "total": 2, "hasMore": False,
+        "searchResults": [
+            {"entity": {"urn": _BILL_U}, "degree": 1},
+            {"entity": {"urn": "urn:li:chart:(looker,dashboard_elem_1)"}},
+        ],
+    }}
+    _lineage_session(monkeypatch, payload)
+    urns = cat.mcp_upstream_urns("http://gms", _ASSET_U)
+    assert urns == [_BILL_U], urns
