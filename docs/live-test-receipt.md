@@ -9,7 +9,7 @@ http://localhost:8080, then updating the values below from the run.
 
 | field | value |
 |---|---|
-| commit under test | `256c6c63c232d8bb48fcf2870aad8cbb43f2c0e1` |
+| commit under test (code identical to the tested tree) | `2caefdfeefa74d23f56aff3e19f9a7359852b96d` |
 | suite result | **158 passed, exit code 0** in 103.37s |
 | live round-trips included | 10 (tests/test_integration_roundtrip.py) |
 | DataHub GMS image | `acryldata/datahub-gms:v1.5.0.6` |
