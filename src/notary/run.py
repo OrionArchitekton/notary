@@ -99,11 +99,18 @@ def lineage_verified_upstream(
     import re as _re
 
     reader = upstream_reader or mcp_upstream_urns
+    # The receipt states exactly what the read enforced, no more (review
+    # finding: an evidence reader must not infer stronger edge semantics
+    # than the parser actually checked).
     receipt: dict = {
         "tool": "get_lineage",
         "transport": "mcp",
         "asset_urn": asset_urn,
         "reference_table": reference_table,
+        "matched_via": "upstreams.searchResults[].entity.urn",
+        "max_hops": 1,
+        "max_results": LINEAGE_MAX_RESULTS,
+        "verified": False,
     }
 
     m = _re.match(
@@ -147,6 +154,7 @@ def lineage_verified_upstream(
     receipt["upstreams_seen"] = len(upstreams)
     if ref_urn in upstreams:
         receipt["upstream_urn"] = ref_urn
+        receipt["verified"] = True
         return True, f"lineage-verified upstream via MCP: {ref_urn}", receipt
     if len(upstreams) >= LINEAGE_MAX_RESULTS:
         # A full page is indistinguishable from a truncated one, so absence

@@ -124,6 +124,10 @@ def mcp_upstream_urns(gms_url: str, asset_urn: str) -> list[str]:
                     "urn": asset_urn,
                     "upstream": True,
                     "max_results": LINEAGE_MAX_RESULTS,
+                    # pinned: the default is 1 today, and a server-side
+                    # default change would silently widen what counts as
+                    # an "upstream" for a gate that authorizes rewrites
+                    "max_hops": 1,
                 },
             )
             if getattr(res, "isError", False):
@@ -153,27 +157,37 @@ def mcp_upstream_urns(gms_url: str, asset_urn: str) -> list[str]:
             # both directions in one response (PR #12 bot finding; 0.6.0
             # derives downstream = not upstream, so it does not today).
             root = payload.get("upstreams") if isinstance(payload, dict) else None
-            if root is None:
+            if not isinstance(root, dict):
                 raise RuntimeError(
                     f"get_lineage response carried no 'upstreams' section "
                     f"for {asset_urn}"
                 )
-            stack = [root]
-            while stack:
-                node = stack.pop()
-                if isinstance(node, dict):
-                    stack.extend(node.values())
-                elif isinstance(node, list):
-                    stack.extend(node)
-                elif isinstance(node, str) and node.startswith(
-                    "urn:li:dataset:"
-                ):
-                    urns.append(node)
-            # Truncation is judged on what the SERVER returned, BEFORE
-            # dedupe and self-exclusion (self-review finding: a full page
-            # containing a duplicate or a self-edge would otherwise arrive
-            # under the cap and defeat the caller's truncation check, so an
-            # absence conclusion could rest on a list that was cut short).
+            # STRUCTURAL, not a scrape (review finding): read the entity urn
+            # of each declared search result. Scraping every urn-shaped
+            # string under `upstreams` would prove only "this appeared
+            # somewhere in the payload", so a urn sitting in facets or any
+            # future sibling structure could be accepted as an upstream edge.
+            results = root.get("searchResults")
+            if not isinstance(results, list):
+                raise RuntimeError(
+                    f"get_lineage 'upstreams' carried no searchResults list "
+                    f"for {asset_urn}"
+                )
+            for entry in results:
+                entity = (entry or {}).get("entity") if isinstance(entry, dict) else None
+                urn = (entity or {}).get("urn") if isinstance(entity, dict) else None
+                if isinstance(urn, str) and urn.startswith("urn:li:dataset:"):
+                    urns.append(urn)
+            # Truncation: the server states it explicitly via hasMore, which
+            # is authoritative. The raw-count check stays as a backstop, and
+            # is judged BEFORE dedupe and self-exclusion (a full page holding
+            # a duplicate or self-edge would otherwise slip under the cap).
+            if root.get("hasMore") is True:
+                raise RuntimeError(
+                    f"get_lineage reported hasMore=true for {asset_urn} "
+                    f"(total={root.get('total')!r}); the upstream list is "
+                    f"truncated, refusing to conclude absence"
+                )
             if len(urns) >= LINEAGE_MAX_RESULTS:
                 raise RuntimeError(
                     f"get_lineage returned {len(urns)} upstream urns at the "

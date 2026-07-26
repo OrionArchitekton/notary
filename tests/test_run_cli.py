@@ -477,3 +477,120 @@ def test_truncation_is_detected_on_the_raw_count_not_the_filtered_one(monkeypatc
     import pytest as _pytest
     with _pytest.raises(RuntimeError, match="truncat"):
         cat.mcp_upstream_urns("http://gms", asset)
+
+
+def _lineage_session(monkeypatch, payload):
+    """Install a fake MCP session returning `payload` from get_lineage,
+    capturing the tool arguments for assertion."""
+    import json
+
+    import notary.catalog as cat
+
+    seen = {}
+
+    class _Block:
+        text = json.dumps(payload)
+
+    class _Res:
+        isError = False
+        content = [_Block()]
+
+    class _Session:
+        async def call_tool(self, name, args):
+            seen["name"], seen["args"] = name, args
+            return _Res()
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(cat.NotaryWriter, "_session", lambda self: _Ctx())
+    return seen
+
+
+_ASSET_U = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+            "fiction_retail.fct_payments,PROD)")
+_BILL_U = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+           "fiction_retail.billing_invoices,PROD)")
+
+
+def test_upstreams_come_from_searchResults_entities_only(monkeypatch):
+    """Grok review Finding 1: scraping every urn under `upstreams` proves
+    only 'this string appeared somewhere', not 'the server reported this
+    as an upstream edge'. A dataset urn sitting in facets or any other
+    sibling structure must NEVER be accepted as corroborating evidence."""
+    import notary.catalog as cat
+
+    decoy = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+             "fiction_retail.unrelated_mart,PROD)")
+    payload = {"upstreams": {
+        "total": 1,
+        "hasMore": False,
+        "searchResults": [{"entity": {"urn": _BILL_U}, "degree": 1}],
+        "facets": [{"field": "x", "aggregations": [
+            {"value": decoy, "entity": {"urn": decoy}}
+        ]}],
+    }}
+    _lineage_session(monkeypatch, payload)
+    urns = cat.mcp_upstream_urns("http://gms", _ASSET_U)
+    assert urns == [_BILL_U], urns
+    assert decoy not in urns
+
+
+def test_server_hasMore_flag_refuses_as_truncated(monkeypatch):
+    """The server reports truncation explicitly via `hasMore`. That is
+    authoritative and must refuse even when few results came back, where
+    a count-based heuristic alone would happily conclude absence."""
+    import notary.catalog as cat
+
+    payload = {"upstreams": {
+        "total": 5000,
+        "hasMore": True,
+        "searchResults": [{"entity": {"urn": _BILL_U}, "degree": 1}],
+    }}
+    _lineage_session(monkeypatch, payload)
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="truncat"):
+        cat.mcp_upstream_urns("http://gms", _ASSET_U)
+
+
+def test_lineage_call_pins_max_hops(monkeypatch):
+    """Grok review Finding 3: max_hops defaults to 1 today but is not
+    pinned; a default change would silently widen what counts as an
+    'upstream'. Pin it at the call site."""
+    import notary.catalog as cat
+
+    payload = {"upstreams": {"total": 0, "hasMore": False, "searchResults": []}}
+    seen = _lineage_session(monkeypatch, payload)
+    cat.mcp_upstream_urns("http://gms", _ASSET_U)
+    assert seen["args"]["max_hops"] == 1
+    assert seen["args"]["upstream"] is True
+
+
+def test_receipt_states_only_what_the_read_enforced():
+    """Grok review Finding 3: an evidence reader must not infer stronger
+    edge semantics than the parser checked. The receipt names the exact
+    path matched, pins the hop bound, and carries an explicit verified
+    flag rather than implying success from the presence of a urn."""
+    from notary.run import lineage_verified_upstream
+
+    ok, _, receipt = lineage_verified_upstream(
+        "http://gms", _ASSET_URN, "billing_invoices",
+        upstream_reader=lambda g, a: [_BILLING_URN],
+    )
+    assert ok
+    assert receipt["verified"] is True
+    assert receipt["matched_via"] == "upstreams.searchResults[].entity.urn"
+    assert receipt["max_hops"] == 1
+
+    ok2, _, receipt2 = lineage_verified_upstream(
+        "http://gms", _ASSET_URN, "billing_invoices",
+        upstream_reader=lambda g, a: [],
+    )
+    assert not ok2
+    # a refusal must never look verified
+    assert receipt2["verified"] is False
+    assert "upstream_urn" not in receipt2
