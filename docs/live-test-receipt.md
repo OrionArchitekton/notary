@@ -41,9 +41,15 @@ a full `notary.rollback` round-trip that restores the pre-image and leaves the
 demo catalog populated.
 
 A captured dossier from a real run, including the MCP lineage-gate receipt that
-authorized the contradiction, is committed at
+authorized that contradiction, is committed at
 [examples/evidence-dossier-amount-live-mcp.md](../examples/evidence-dossier-amount-live-mcp.md).
-The same receipt is carried on the hosted replay: open the flagship finding's
-evidence dossier and read the `lineage_gate` block. It is captured by
-`scripts/capture_lineage_receipt.py` against a live quickstart and replayed
-verbatim, so the page never issues a DataHub call at build or load time.
+Its `lineage_gate` block is from a run predating the receipt hardening, so it
+records the asset, the reference and the matched upstream but not the later
+`verified`, `matched_via`, `max_hops` and `max_results` fields. It is kept as
+what that run actually produced rather than back-edited to look current.
+
+The hosted replay carries a SEPARATE receipt in the current shape, including
+`verified: true`. It is captured by `scripts/capture_lineage_receipt.py`
+against a live quickstart and replayed verbatim, so the page never issues a
+DataHub call at build or load time. Open the flagship finding's evidence
+dossier and read the `lineage_gate` block.
