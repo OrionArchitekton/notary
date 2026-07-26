@@ -61,8 +61,24 @@ ADD after the sentence describing the verification loop:
 
 ## 4. Test count
 
-Confirm the live number at paste time with `pytest -q` at the freeze SHA and use
-it verbatim. Do not paste a remembered number.
+The pasted copy says "N tests, 10 of them live DataHub round-trips", so the
+number must come from a run where those 10 ACTUALLY RAN. `pytest -q` SKIPS them
+when no DataHub quickstart is listening on localhost:8080, which reports a
+smaller passed count and would contradict the sentence it sits in.
+
+At paste time, at the freeze SHA:
+
+1. Confirm the quickstart is up: `curl -s -o /dev/null -w '%{http_code}'
+   http://localhost:8080/health` must print `200`. If it does not, either start
+   it (`datahub docker quickstart`) or paste the numbers recorded in
+   `docs/live-test-receipt.md`, which were captured with it running.
+2. Run `pytest -q` and read the summary line.
+   - Expected with the quickstart up: `166 passed` and **no** skips.
+   - Without it, the live module skips at import (`allow_module_level=True`),
+     so the summary reads `156 passed, 1 skipped`: one SKIPPED MODULE, not 10
+     skipped tests. Do NOT paste 156, and do not read "1 skipped" as "only one
+     test missing"; fix step 1 first.
+3. Paste the passed count verbatim. Do not paste a remembered number.
 
 ## 5. Form check (the connector cannot read saved answers)
 
