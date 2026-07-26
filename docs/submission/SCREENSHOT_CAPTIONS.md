@@ -17,3 +17,6 @@
 
 6. `06-honest-table.png`
    The scorecard we publish verbatim: 12 planted lies, 9 caught, 0 false positives, misses disclosed with reasons in the README.
+
+7. `07-mcp-lineage-receipt.png`
+   The gate itself: the dossier carries the stock get_lineage receipt (verified upstream) and the 2000/2000 key reconciliation.

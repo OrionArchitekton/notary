@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from notary.demo.seeder import MANIFEST
 from notary.eval import _entry_prompt_key
 from notary.extract import KNOWN_UNCAPTURABLE, _prompt_key
@@ -20,6 +22,7 @@ from notary.extract import KNOWN_UNCAPTURABLE, _prompt_key
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from capture_replay_data import FLAGSHIP_URN  # noqa: E402
 from s5_next_agent import S5_SYSTEM  # noqa: E402
 
 
@@ -35,6 +38,19 @@ def _capture(tmp_path, name):
     )
     assert r.returncode == 0, r.stderr
     return out
+
+
+def _evidence_json(dossier_markdown):
+    """The evidence dict the dossier renders, parsed back out of its fenced
+    block: the exact bytes a judge reading the hosted page sees, not the
+    in-process object that produced them."""
+    for block in dossier_markdown.split("```"):
+        candidate = block.strip()
+        if candidate.startswith("json"):
+            candidate = candidate[len("json"):].strip()
+        if candidate.startswith("{"):
+            return json.loads(candidate)
+    raise AssertionError("the dossier carries no JSON evidence block")
 
 
 def _broken_store(tmp_path):
@@ -188,3 +204,128 @@ def test_replay_data_is_complete_and_reproducible(tmp_path):
     assert "USD" in data["s5"]["view1"]
     assert "cents" in data["s5"]["view2"].lower()
     assert "12795" in data["s5"]["view2"]
+
+
+def test_replay_flagship_dossier_carries_the_mcp_lineage_receipt(tmp_path):
+    """The ONE behavior this locks: the flagship contradiction the hosted
+    page shows carries the MCP get_lineage receipt that AUTHORIZED it, so
+    the DataHub read gating the verdict is visible on the judge's primary
+    path instead of only in a repo file. The receipt is captured from a
+    real live run and replayed verbatim, exactly like the completions.
+    """
+    out = _capture(tmp_path, "replay-data.json")
+    data = json.loads(out.read_text())
+
+    flagship = next(f for f in data["findings"] if f["field"] == "amount")
+    assert flagship["verdict"] == "CONTRADICTED"
+    receipt = _evidence_json(flagship["dossier_markdown"])["lineage_gate"]
+
+    # what the read WAS, and that it actually authorized this verdict
+    assert receipt["tool"] == "get_lineage"
+    assert receipt["transport"] == "mcp"
+    assert receipt["verified"] is True
+    assert receipt["asset_urn"] == FLAGSHIP_URN
+    # the upstream it matched is the reconciliation reference, not a
+    # near-miss urn that happened to come back in the same page
+    assert receipt["reference_table"] == "billing_invoices"
+    assert receipt["upstream_urn"] == receipt["expected_upstream_urn"]
+    assert "billing_invoices" in receipt["upstream_urn"]
+
+
+def test_receipt_is_unpublishable_when_the_manifest_drops_the_edge():
+    """The ONE behavior this locks: the offline evaluation applies the
+    declared reconciliation WITHOUT calling the live lineage gate, so a
+    frozen receipt may only be published while the manifest still declares
+    the upstream edge that gate would have verified. Drop the edge and the
+    receipt must stop being publishable, otherwise the page could show
+    `verified: true` for an authorization the current manifest no longer
+    supports."""
+    import dataclasses
+
+    import capture_replay_data as cap
+
+    class _Flagship:
+        evidence = {
+            "probe_sql": 'select 1 from "billing_invoices" limit 1',
+        }
+
+    receipt_path = (
+        ROOT / "tests" / "fixtures" / "lineage"
+        / "flagship-lineage-receipt.json"
+    )
+    # positive control: the shipped manifest DOES declare the edge
+    assert cap._lineage_receipt(str(receipt_path), _Flagship())["verified"]
+
+    stripped = dataclasses.replace(cap.MANIFEST, lineage=())
+    with pytest.raises(ValueError, match="lineage"):
+        cap._lineage_receipt(str(receipt_path), _Flagship(), manifest=stripped)
+
+
+def test_capture_rejects_a_stale_or_non_authorizing_lineage_receipt(tmp_path):
+    """The ONE behavior this locks: a receipt that did not authorize THIS
+    run's flagship read is refused BEFORE any output is written, so the
+    page can never claim an MCP-gated verdict while showing a read that
+    never passed, gated a different asset, or names a reference this run
+    never probed."""
+    good = json.loads(
+        (ROOT / "tests" / "fixtures" / "lineage"
+         / "flagship-lineage-receipt.json").read_text()
+    )
+    doctored = {
+        "never passed": {**good, "verified": False},
+        "gated another asset": {
+            **good,
+            "asset_urn": good["asset_urn"].replace(
+                "fct_payments", "dim_customers"
+            ),
+        },
+        "names an unprobed reference": {
+            **good, "reference_table": "not_a_table_this_run_touched",
+        },
+        "matched an upstream it did not expect": {
+            **good,
+            "upstream_urn": good["expected_upstream_urn"].replace(
+                "billing_invoices", "dim_customers"
+            ),
+        },
+        # a SUBSTRING of the real reference, with the urns re-derived to
+        # match it, defeats any check that asks whether the reference merely
+        # appears somewhere in the probe SQL (review finding, PR #13)
+        "names a substring of the real reference": {
+            **good,
+            "reference_table": "invoices",
+            "upstream_urn": good["expected_upstream_urn"].replace(
+                "billing_invoices", "invoices"
+            ),
+            "expected_upstream_urn": good["expected_upstream_urn"].replace(
+                "billing_invoices", "invoices"
+            ),
+        },
+        # self-consistent but wrong: comparing two fields of the receipt to
+        # each other trusts the artifact to grade itself, so both moving
+        # together must not pass (review finding, PR #13)
+        "names an unrelated upstream in BOTH fields": {
+            **good,
+            "upstream_urn": good["expected_upstream_urn"].replace(
+                "billing_invoices", "dim_customers"
+            ),
+            "expected_upstream_urn": good["expected_upstream_urn"].replace(
+                "billing_invoices", "dim_customers"
+            ),
+        },
+    }
+    for label, receipt in doctored.items():
+        path = tmp_path / "receipt.json"
+        path.write_text(json.dumps(receipt))
+        out = tmp_path / "replay-data.json"
+        r = subprocess.run(
+            [
+                sys.executable, "scripts/capture_replay_data.py",
+                "--out", str(out),
+                "--db", str(tmp_path / "wh.duckdb"),
+                "--lineage-receipt", str(path),
+            ],
+            capture_output=True, text=True, timeout=300, cwd=str(ROOT),
+        )
+        assert r.returncode != 0, f"a receipt that {label} was accepted"
+        assert not out.exists(), f"a receipt that {label} still published"

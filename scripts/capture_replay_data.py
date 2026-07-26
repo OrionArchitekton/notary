@@ -25,6 +25,7 @@ from notary.catalog import _corrected_description, _dossier_markdown  # noqa: E4
 from notary.demo.seeder import ANCHOR_DATE, DEFAULT_SEED, MANIFEST, build_warehouse  # noqa: E402
 from notary.eval import evaluate, missing_fixtures, unexpected_failures  # noqa: E402
 from notary.extract import ReplayLLM, _prompt_key  # noqa: E402
+from notary.run import expected_upstream_urn  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -41,10 +42,92 @@ DISCLOSURE = (
     "(run date 2026-07-18), assembled from that run's inputs: the seeded "
     "demo warehouse, the captured Claude extractions (replayed verbatim), "
     "and Notary's own write-back formatters, plus two separately captured "
-    "agent answers that are prompt-bound to this evaluation's evidence. "
-    "Nothing is generated when this page loads. Full local-run instructions "
-    "live in the repository README."
+    "agent answers that are prompt-bound to this evaluation's evidence, and "
+    "a separately captured MCP get_lineage receipt from a live DataHub run. "
+    "That receipt is a real read and it did verify, but this offline "
+    "evaluation applies the manifest's declared reconciliation directly "
+    "instead of re-running the lineage gate, so read the receipt as the live "
+    "gate's recorded result for this asset and reference, not as the step "
+    "that produced the verdict below. Nothing is generated when this page "
+    "loads. Full local-run instructions live in the repository README."
 )
+
+
+LINEAGE_RECEIPT = "tests/fixtures/lineage/flagship-lineage-receipt.json"
+
+
+def _lineage_receipt(path: str, flagship, manifest=None) -> dict:
+    """The captured MCP `get_lineage` receipt that AUTHORIZED the flagship
+    contradiction, replayed verbatim. Same contract as the captured
+    completions: a real read, frozen once by
+    scripts/capture_lineage_receipt.py, never re-issued at page-build time
+    (so two builds stay byte-identical and the page builds without a
+    quickstart).
+
+    Fail-closed like _s5_views: the receipt must be a VERIFIED read of THIS
+    run's flagship asset whose matched upstream is the reconciliation
+    reference THIS run actually probed. An unverified receipt, one for
+    another asset, or one naming a reference this run never touched is a
+    stale capture and aborts before any output is written."""
+    receipt = json.loads(Path(path).read_text())
+    reference = receipt.get("reference_table")
+    probe_sql = flagship.evidence.get("probe_sql", "")
+    # Take the required reference from the MANIFEST this run evaluated, and
+    # derive the required upstream from THAT, so nothing the receipt carries
+    # can influence what it is checked against. Deriving from the receipt's
+    # own reference let a doctored one name a SUBSTRING of the real table
+    # ("invoices" inside "billing_invoices"), re-derive both urn fields to
+    # match it, and pass every check (review finding, PR #13).
+    manifest = manifest if manifest is not None else MANIFEST
+    recon = manifest.reconciliations.get((PAYMENTS_TABLE, "amount"))
+    required_reference = recon.table if recon else None
+    derived = (
+        expected_upstream_urn(FLAGSHIP_URN, required_reference)
+        if required_reference
+        else None
+    )
+    checks = {
+        "is a get_lineage read over MCP": (
+            receipt.get("tool") == "get_lineage"
+            and receipt.get("transport") == "mcp"
+        ),
+        "verified (authorized the verdict)": receipt.get("verified") is True,
+        "reads THIS run's flagship asset": (
+            receipt.get("asset_urn") == FLAGSHIP_URN
+        ),
+        "matched the upstream THIS run requires": bool(derived)
+        and receipt.get("upstream_urn") == derived
+        and receipt.get("expected_upstream_urn") == derived,
+        "names the reference THIS run reconciled against": (
+            required_reference is not None and reference == required_reference
+        ),
+        # and that reference must really appear in this run's probe, as a
+        # QUOTED identifier: bare substring membership matched a fake
+        # reference nested inside the real table name
+        "probed that reference in THIS run": (
+            bool(required_reference)
+            and f'"{required_reference}"' in probe_sql
+        ),
+        # The offline evaluation applies the declared reconciliation WITHOUT
+        # calling the live lineage gate, so publishing this receipt beside it
+        # is only honest while the manifest still declares the very edge that
+        # gate verifies. Drop the edge and a stale receipt would otherwise
+        # keep asserting an authorization the manifest no longer supports
+        # (review finding, PR #13).
+        "still declared as a lineage edge by this manifest": (
+            bool(required_reference)
+            and (required_reference, PAYMENTS_TABLE) in tuple(
+                manifest.lineage or ()
+            )
+        ),
+    }
+    failed = [name for name, ok in checks.items() if not ok]
+    if failed:
+        raise ValueError(
+            f"captured lineage receipt {path} cannot be published beside "
+            f"this run; it is not: {'; '.join(failed)}"
+        )
+    return receipt
 
 
 def _s5_views(fixtures_dir: str, required_view2: tuple[str, ...] = ()) -> dict:
@@ -108,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="web/replay-data.json")
     parser.add_argument("--db", default=".notary/replay-wh.duckdb")
     parser.add_argument("--fixtures", default="tests/fixtures/llm")
+    parser.add_argument("--lineage-receipt", default=LINEAGE_RECEIPT)
     args = parser.parse_args(argv)
 
     # Same fail-closed gates as notary.eval.main (pipeline finding: without
@@ -151,12 +235,29 @@ def main(argv: list[str] | None = None) -> int:
     }
     before = payments["amount"].description
 
+    entries = [r for r in report.entries if r.entry.table == PAYMENTS_TABLE]
+    flagship = None
+    for r in entries:
+        for f in r.findings:
+            if f.verdict.value == "CONTRADICTED" and f.claim.field_path == "amount":
+                flagship = f
+    if flagship is None:
+        raise RuntimeError("the flagship cents lie was not contradicted")
+
+    # The MCP read that authorized this contradiction rides in the SAME
+    # evidence dict the dossier renders, so the hosted page shows the
+    # DataHub read behind the verdict, not just the verdict.
+    try:
+        flagship.evidence["lineage_gate"] = _lineage_receipt(
+            args.lineage_receipt, flagship
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 4
+
     findings_out = []
     after_description = None
-    flagship = None
-    for r in report.entries:
-        if r.entry.table != PAYMENTS_TABLE:
-            continue
+    for r in entries:
         for f in r.findings:
             item = {
                 "field": f.claim.field_path or "(table)",
@@ -169,11 +270,22 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             }
             findings_out.append(item)
-            if f.verdict.value == "CONTRADICTED" and f.claim.field_path == "amount":
+            if f is flagship:
                 after_description = _corrected_description(f, ANCHOR_DATE)
-                flagship = f
-    if after_description is None or flagship is None:
+    if after_description is None:
         raise RuntimeError("the flagship cents lie was not contradicted")
+
+    # Positive proof the receipt reached the page a judge reads, not merely
+    # that no validation raised on the way there.
+    published = next(i for i in findings_out if i["field"] == "amount")
+    if '"lineage_gate"' not in published["dossier_markdown"]:
+        print(
+            "error: the flagship dossier does not carry the lineage "
+            "receipt; refusing to publish a replay that claims an MCP-gated "
+            "verdict without showing the read",
+            file=sys.stderr,
+        )
+        return 5
 
     # The S5 view2 prompt embeds the catalog context its answer was captured
     # against; this run's flagship dossier line must appear in it verbatim
