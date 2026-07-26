@@ -1,6 +1,7 @@
 # Devpost story update (v4), paste-ready for Dan
 
-Three edits to the LIVE Devpost entry. All are Dan-only (Devpost save is
+Six changes to the LIVE Devpost entry (four story edits, one gallery
+re-upload, one form check). All are Dan-only (Devpost save is
 operator-gated). Apply before the Aug 10, 2:00 PM PDT deadline; never after.
 
 Supersedes DEVPOST-V3-UPDATE.md, which is already applied and live.
@@ -59,7 +60,9 @@ ADD after the sentence describing the verification loop:
     all refuse rather than fall back to another transport. The same agent that
     writes through MCP now reads its gating evidence through MCP. The receipt is
     visible on the hosted replay: open the flagship finding's evidence dossier
-    and read the lineage_gate block.
+    and read the lineage_gate block. The replay is a frozen capture, so that
+    receipt is the live gate's recorded result for the same asset and reference
+    rather than a read performed by the page, and the page says so.
 
 ## 4. Test count
 
@@ -75,10 +78,10 @@ At paste time, at the freeze SHA:
    it (`datahub docker quickstart`) or paste the numbers recorded in
    `docs/live-test-receipt.md`, which were captured with it running.
 2. Run `pytest -q` and read the summary line.
-   - Expected with the quickstart up: `168 passed` and **no** skips.
+   - Expected with the quickstart up: `169 passed` and **no** skips.
    - Without it, the live module skips at import (`allow_module_level=True`),
-     so the summary reads `158 passed, 1 skipped`: one SKIPPED MODULE, not 10
-     skipped tests. Do NOT paste 158, and do not read "1 skipped" as "only one
+     so the summary reads `159 passed, 1 skipped`: one SKIPPED MODULE, not 10
+     skipped tests. Do NOT paste 159, and do not read "1 skipped" as "only one
      test missing"; fix step 1 first.
 3. Paste the passed count verbatim. Do not paste a remembered number.
 

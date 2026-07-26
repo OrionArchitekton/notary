@@ -531,11 +531,29 @@ def test_rollback_removes_all_notary_state(ingested, tmp_path):
     import sys
     from pathlib import Path
 
-    from notary.incidents import find_open_notary_incident, incident_title
+    from notary.incidents import (
+        find_open_notary_incident,
+        incident_title,
+        resolve_incident,
+    )
     from notary.rollback import _read_structured_properties
 
     repo_root = Path(__file__).parent.parent
     env = {**os.environ, "NOTARY_RUN_DATE": "2026-07-18"}
+    # Start from a known state, for the same reason the obsolete-incident
+    # test does. The post-rollback assertion below is GLOBAL ("no open
+    # Notary incident on this asset"), which is the property worth holding,
+    # but any incident left open by a sibling test or an earlier run against
+    # this shared quickstart fails it for reasons unrelated to rollback.
+    # Draining first keeps the assertion strong without coupling it to what
+    # else touched the asset.
+    for _ in range(40):
+        stale = find_open_notary_incident(
+            GMS, PAYMENTS_URN, incident_title(PAYMENTS_URN)
+        )
+        if stale is None:
+            break
+        resolve_incident(GMS, stale, note="Test setup: drain pre-existing")
     _reset_editable_description(
         PAYMENTS_URN, "amount", "Transaction amount in USD."
     )

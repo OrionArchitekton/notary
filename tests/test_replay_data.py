@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from notary.demo.seeder import MANIFEST
 from notary.eval import _entry_prompt_key
 from notary.extract import KNOWN_UNCAPTURABLE, _prompt_key
@@ -228,6 +230,35 @@ def test_replay_flagship_dossier_carries_the_mcp_lineage_receipt(tmp_path):
     assert receipt["reference_table"] == "billing_invoices"
     assert receipt["upstream_urn"] == receipt["expected_upstream_urn"]
     assert "billing_invoices" in receipt["upstream_urn"]
+
+
+def test_receipt_is_unpublishable_when_the_manifest_drops_the_edge():
+    """The ONE behavior this locks: the offline evaluation applies the
+    declared reconciliation WITHOUT calling the live lineage gate, so a
+    frozen receipt may only be published while the manifest still declares
+    the upstream edge that gate would have verified. Drop the edge and the
+    receipt must stop being publishable, otherwise the page could show
+    `verified: true` for an authorization the current manifest no longer
+    supports."""
+    import dataclasses
+
+    import capture_replay_data as cap
+
+    class _Flagship:
+        evidence = {
+            "probe_sql": 'select 1 from "billing_invoices" limit 1',
+        }
+
+    receipt_path = (
+        ROOT / "tests" / "fixtures" / "lineage"
+        / "flagship-lineage-receipt.json"
+    )
+    # positive control: the shipped manifest DOES declare the edge
+    assert cap._lineage_receipt(str(receipt_path), _Flagship())["verified"]
+
+    stripped = dataclasses.replace(cap.MANIFEST, lineage=())
+    with pytest.raises(ValueError, match="lineage"):
+        cap._lineage_receipt(str(receipt_path), _Flagship(), manifest=stripped)
 
 
 def test_capture_rejects_a_stale_or_non_authorizing_lineage_receipt(tmp_path):

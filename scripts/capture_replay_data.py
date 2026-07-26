@@ -42,16 +42,21 @@ DISCLOSURE = (
     "(run date 2026-07-18), assembled from that run's inputs: the seeded "
     "demo warehouse, the captured Claude extractions (replayed verbatim), "
     "and Notary's own write-back formatters, plus two separately captured "
-    "agent answers that are prompt-bound to this evaluation's evidence. "
-    "Nothing is generated when this page loads. Full local-run instructions "
-    "live in the repository README."
+    "agent answers that are prompt-bound to this evaluation's evidence, and "
+    "a separately captured MCP get_lineage receipt from a live DataHub run. "
+    "That receipt is a real read and it did verify, but this offline "
+    "evaluation applies the manifest's declared reconciliation directly "
+    "instead of re-running the lineage gate, so read the receipt as the live "
+    "gate's recorded result for this asset and reference, not as the step "
+    "that produced the verdict below. Nothing is generated when this page "
+    "loads. Full local-run instructions live in the repository README."
 )
 
 
 LINEAGE_RECEIPT = "tests/fixtures/lineage/flagship-lineage-receipt.json"
 
 
-def _lineage_receipt(path: str, flagship) -> dict:
+def _lineage_receipt(path: str, flagship, manifest=None) -> dict:
     """The captured MCP `get_lineage` receipt that AUTHORIZED the flagship
     contradiction, replayed verbatim. Same contract as the captured
     completions: a real read, frozen once by
@@ -73,7 +78,8 @@ def _lineage_receipt(path: str, flagship) -> dict:
     # own reference let a doctored one name a SUBSTRING of the real table
     # ("invoices" inside "billing_invoices"), re-derive both urn fields to
     # match it, and pass every check (review finding, PR #13).
-    recon = MANIFEST.reconciliations.get((PAYMENTS_TABLE, "amount"))
+    manifest = manifest if manifest is not None else MANIFEST
+    recon = manifest.reconciliations.get((PAYMENTS_TABLE, "amount"))
     required_reference = recon.table if recon else None
     derived = (
         expected_upstream_urn(FLAGSHIP_URN, required_reference)
@@ -101,6 +107,18 @@ def _lineage_receipt(path: str, flagship) -> dict:
         "probed that reference in THIS run": (
             bool(required_reference)
             and f'"{required_reference}"' in probe_sql
+        ),
+        # The offline evaluation applies the declared reconciliation WITHOUT
+        # calling the live lineage gate, so publishing this receipt beside it
+        # is only honest while the manifest still declares the very edge that
+        # gate verifies. Drop the edge and a stale receipt would otherwise
+        # keep asserting an authorization the manifest no longer supports
+        # (review finding, PR #13).
+        "still declared as a lineage edge by this manifest": (
+            bool(required_reference)
+            and (required_reference, PAYMENTS_TABLE) in tuple(
+                manifest.lineage or ()
+            )
         ),
     }
     failed = [name for name, ok in checks.items() if not ok]
