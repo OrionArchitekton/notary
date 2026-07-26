@@ -430,3 +430,50 @@ def test_upstream_parser_ignores_downstream_subtree(monkeypatch):
     urns = cat.mcp_upstream_urns("http://gms", asset)
     assert urns == [good], urns
     assert bad not in urns
+
+
+def test_truncation_is_detected_on_the_raw_count_not_the_filtered_one(monkeypatch):
+    """Self-review finding (PR #12): the parser dedupes and drops the
+    asset's own urn BEFORE the gate counts. A truncated full page that
+    contains a duplicate or a self-edge therefore arrives under the cap
+    and slips past truncation detection, letting the gate conclude
+    'not an upstream' from a list that was actually cut short. Truncation
+    must be judged on what the SERVER returned."""
+    import json
+
+    import notary.catalog as cat
+
+    asset = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+             "fiction_retail.fct_payments,PROD)")
+    # a full page: asset self-edge + duplicate + fillers == LINEAGE_MAX_RESULTS
+    raw = [asset, asset] + [
+        f"urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.up{i},PROD)"
+        for i in range(cat.LINEAGE_MAX_RESULTS - 2)
+    ]
+    assert len(raw) == cat.LINEAGE_MAX_RESULTS
+    payload = {"upstreams": {"searchResults": [
+        {"entity": {"urn": u}} for u in raw
+    ]}}
+
+    class _Block:
+        text = json.dumps(payload)
+
+    class _Res:
+        isError = False
+        content = [_Block()]
+
+    class _Session:
+        async def call_tool(self, name, args):
+            return _Res()
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(cat.NotaryWriter, "_session", lambda self: _Ctx())
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="truncat"):
+        cat.mcp_upstream_urns("http://gms", asset)

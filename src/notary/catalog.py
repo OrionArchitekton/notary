@@ -169,6 +169,17 @@ def mcp_upstream_urns(gms_url: str, asset_urn: str) -> list[str]:
                     "urn:li:dataset:"
                 ):
                     urns.append(node)
+            # Truncation is judged on what the SERVER returned, BEFORE
+            # dedupe and self-exclusion (self-review finding: a full page
+            # containing a duplicate or a self-edge would otherwise arrive
+            # under the cap and defeat the caller's truncation check, so an
+            # absence conclusion could rest on a list that was cut short).
+            if len(urns) >= LINEAGE_MAX_RESULTS:
+                raise RuntimeError(
+                    f"get_lineage returned {len(urns)} upstream urns at the "
+                    f"{LINEAGE_MAX_RESULTS} cap for {asset_urn}; the result "
+                    f"may be truncated, refusing to conclude absence"
+                )
             # never let the asset itself count as its own upstream
             return [u for u in dict.fromkeys(urns) if u != asset_urn]
 
