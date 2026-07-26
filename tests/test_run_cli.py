@@ -382,3 +382,51 @@ def test_lineage_gate_refuses_on_possible_truncation():
     assert not ok
     assert "truncat" in detail.lower()
     assert "truncat" in (receipt.get("error") or "").lower()
+
+
+def test_upstream_parser_ignores_downstream_subtree(monkeypatch):
+    """PR #12 bot finding, adjudicated: mcp-server-datahub 0.6.0 has no
+    `downstream` argument (it derives downstream = not upstream), and a
+    live reverse-direction probe confirmed no leakage today. But parsing
+    the WHOLE payload would leak if a future version ever returned both
+    directions in one response, and this gate authorizes catalog
+    rewrites. So the parser reads ONLY the upstreams subtree."""
+    import json
+
+    import notary.catalog as cat
+
+    asset = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+             "fiction_retail.fct_payments,PROD)")
+    good = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+            "fiction_retail.billing_invoices,PROD)")
+    bad = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+           "fiction_retail.reporting_mart,PROD)")
+    payload = {
+        "upstreams": {"searchResults": [{"entity": {"urn": good}}]},
+        "downstreams": {"searchResults": [{"entity": {"urn": bad}}]},
+    }
+
+    class _Block:
+        text = json.dumps(payload)
+
+    class _Res:
+        isError = False
+        content = [_Block()]
+
+    class _Session:
+        async def call_tool(self, name, args):
+            assert name == "get_lineage"
+            assert args["upstream"] is True
+            return _Res()
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(cat.NotaryWriter, "_session", lambda self: _Ctx())
+    urns = cat.mcp_upstream_urns("http://gms", asset)
+    assert urns == [good], urns
+    assert bad not in urns

@@ -114,7 +114,6 @@ def mcp_upstream_urns(gms_url: str, asset_urn: str) -> list[str]:
     failed read as a refusal, never as "no upstreams" (fail-closed)."""
     import asyncio
     import json as _json
-    import re as _re
 
     async def _read() -> list[str]:
         writer = NotaryWriter(gms_url)
@@ -140,19 +139,36 @@ def mcp_upstream_urns(gms_url: str, asset_urn: str) -> list[str]:
             urns: list[str] = []
             try:
                 payload = _json.loads(text)
-                stack = [payload]
-                while stack:
-                    node = stack.pop()
-                    if isinstance(node, dict):
-                        stack.extend(node.values())
-                    elif isinstance(node, list):
-                        stack.extend(node)
-                    elif isinstance(node, str) and node.startswith(
-                        "urn:li:dataset:"
-                    ):
-                        urns.append(node)
-            except _json.JSONDecodeError:
-                urns = _re.findall(r"urn:li:dataset:\([^)]*\)", text)
+            except _json.JSONDecodeError as e:
+                # An unparseable payload is a REFUSAL, not an empty result:
+                # regex-scraping the whole blob cannot tell an upstream from
+                # a downstream, and this gate authorizes catalog rewrites.
+                raise RuntimeError(
+                    f"get_lineage returned unparseable content for "
+                    f"{asset_urn}: {str(e)[:120]}"
+                ) from e
+            # Direction-explicit: walk ONLY the upstreams subtree. Parsing
+            # the whole payload would silently accept a DOWNSTREAM urn as
+            # corroborating evidence if a future server version returned
+            # both directions in one response (PR #12 bot finding; 0.6.0
+            # derives downstream = not upstream, so it does not today).
+            root = payload.get("upstreams") if isinstance(payload, dict) else None
+            if root is None:
+                raise RuntimeError(
+                    f"get_lineage response carried no 'upstreams' section "
+                    f"for {asset_urn}"
+                )
+            stack = [root]
+            while stack:
+                node = stack.pop()
+                if isinstance(node, dict):
+                    stack.extend(node.values())
+                elif isinstance(node, list):
+                    stack.extend(node)
+                elif isinstance(node, str) and node.startswith(
+                    "urn:li:dataset:"
+                ):
+                    urns.append(node)
             # never let the asset itself count as its own upstream
             return [u for u in dict.fromkeys(urns) if u != asset_urn]
 
