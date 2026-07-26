@@ -37,8 +37,13 @@ clock). Target submit: on or before 2026-08-08. Judging window: Aug 17-31.
 
 ## Freeze
 
-- Freeze SHA: FILL AT FREEZE (origin/main after the demo-and-submission PR
-  merges; verify local == origin).
+- Freeze SHA: `63263b89bcabf04888c5d719a48a65741f52c2df` (short `63263b8`), the
+  merge of the evidence-sync PR #13. Verified at freeze: canonical home clean on
+  `main` and in sync with origin, public CI success on that commit, full suite
+  169 passed exit 0 against a live quickstart, and the hosted replay serving the
+  MCP lineage receipt with `verified: true`.
+- This checklist entry is a docs-only record of that freeze. Recording it does
+  not change the frozen code; the SHA above stays the code freeze.
 - After freeze: at most ONE late slice on the weakest judged axis, additive
   only, kill-dated; the recorded video must stay valid without re-render.
   The only always-permitted edit is the video-URL placeholder.
