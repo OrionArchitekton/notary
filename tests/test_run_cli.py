@@ -175,150 +175,7 @@ def test_schema_fingerprint_match_is_pure_and_strict():
     assert not schema_matches(catalog_fields=[], warehouse_columns=["a"])
 
 
-def test_lineage_gate_refuses_without_upstream_edge(monkeypatch):
-    """Judge-slice v3: a declared reconciliation source corroborates only
-    when the catalog records it as a lineage UPSTREAM of the suspect;
-    absence and query failure both refuse (fail-closed)."""
-    import io
-    import json
-    import urllib.request
 
-    from notary.run import lineage_verified_upstream
-
-    urn = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
-           "fiction_retail.fct_payments,PROD)")
-    billing = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
-               "fiction_retail.billing_invoices,PROD)")
-
-    def _resp(payload):
-        class _R(io.BytesIO):
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-        return _R(json.dumps(payload).encode())
-
-    # edge present -> verified
-    monkeypatch.setattr(
-        urllib.request, "urlopen",
-        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
-            "relationships": [{"entity": {"urn": billing}}]}}}}),
-    )
-    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
-    assert ok and "lineage-verified" in detail
-
-    # edge absent -> refused
-    monkeypatch.setattr(
-        urllib.request, "urlopen",
-        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
-            "relationships": []}}}}),
-    )
-    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
-    assert not ok and "refused" in detail
-
-    # query failure -> refused, never assumed
-    def _boom(req, timeout=15):
-        raise OSError("connection refused")
-
-    monkeypatch.setattr(urllib.request, "urlopen", _boom)
-    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
-    assert not ok and "refused" in detail
-
-
-def test_lineage_gate_rejects_self_reference_and_qualified_names(monkeypatch):
-    """PR #11 findings: a reference resolving to the suspect itself is
-    refused even when a self-edge exists in the catalog, a qualified
-    reference name is used as-is, and an unqualified suspect name gets no
-    invented prefix."""
-    import io
-    import json
-    import urllib.request
-
-    from notary.run import lineage_verified_upstream
-
-    urn = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
-           "fiction_retail.fct_payments,PROD)")
-
-    def _resp(payload):
-        class _R(io.BytesIO):
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-        return _R(json.dumps(payload).encode())
-
-    # self-edge in the catalog: still refused, no query needed to accept
-    monkeypatch.setattr(
-        urllib.request, "urlopen",
-        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
-            "total": 1, "relationships": [{"entity": {"urn": urn}}]}}}}),
-    )
-    ok, detail = lineage_verified_upstream("http://gms", urn, "fct_payments")
-    assert not ok and "suspect asset itself" in detail
-
-    # a fully qualified reference name is taken verbatim
-    qualified = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
-                 "other_db.billing,PROD)")
-    monkeypatch.setattr(
-        urllib.request, "urlopen",
-        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
-            "total": 1,
-            "relationships": [{"entity": {"urn": qualified}}]}}}}),
-    )
-    ok, detail = lineage_verified_upstream("http://gms", urn, "other_db.billing")
-    assert ok, detail
-
-    # an unqualified suspect name gets no invented prefix
-    bare_urn = "urn:li:dataset:(urn:li:dataPlatform:duckdb,payments,PROD)"
-    bare_ref = "urn:li:dataset:(urn:li:dataPlatform:duckdb,billing,PROD)"
-    monkeypatch.setattr(
-        urllib.request, "urlopen",
-        lambda req, timeout=15: _resp({"data": {"dataset": {"lineage": {
-            "total": 1,
-            "relationships": [{"entity": {"urn": bare_ref}}]}}}}),
-    )
-    ok, detail = lineage_verified_upstream("http://gms", bare_urn, "billing")
-    assert ok, detail
-
-
-def test_lineage_gate_pages_past_the_first_hundred(monkeypatch):
-    """PR #11 finding: a valid source on a later lineage page must be
-    found, not reported absent."""
-    import io
-    import json
-    import urllib.request
-
-    from notary.run import lineage_verified_upstream
-
-    urn = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
-           "fiction_retail.fct_payments,PROD)")
-    billing = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
-               "fiction_retail.billing_invoices,PROD)")
-
-    def _resp(payload):
-        class _R(io.BytesIO):
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-        return _R(json.dumps(payload).encode())
-
-    def _paged(req, timeout=15):
-        body = json.loads(req.data)
-        start = body["variables"]["start"]
-        if start == 0:
-            rels = [{"entity": {"urn": f"urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.up{i},PROD)"}} for i in range(100)]
-        else:
-            rels = [{"entity": {"urn": billing}}]
-        return _resp({"data": {"dataset": {"lineage": {
-            "total": 101, "relationships": rels}}}})
-
-    monkeypatch.setattr(urllib.request, "urlopen", _paged)
-    ok, detail = lineage_verified_upstream("http://gms", urn, "billing_invoices")
-    assert ok, detail
 
 
 def test_recon_refusal_blocks_obsolete_incident_resolution():
@@ -416,3 +273,362 @@ def test_lineage_merge_preserves_existing_upstreams():
         declared=["urn:b", "urn:c"],
     )
     assert merged == ["urn:a", "urn:b", "urn:c"]
+
+
+def test_lineage_gate_reads_through_stock_mcp_tool(monkeypatch):
+    """Judge-slice v4: the verdict-gating lineage read is LOAD-BEARING MCP:
+    it goes through the stock DataHub MCP get_lineage tool, and the tool
+    name + target urn travel back as a receipt for the evidence dossier.
+    A failing MCP read refuses (fail-closed), never silently downgrades to
+    another transport."""
+    from notary.run import lineage_verified_upstream
+
+    asset = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+             "fiction_retail.fct_payments,PROD)")
+    billing = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+               "fiction_retail.billing_invoices,PROD)")
+
+    calls = []
+
+    def fake_reader(gms_url, asset_urn):
+        calls.append((gms_url, asset_urn))
+        return [billing]
+
+    ok, detail, receipt = lineage_verified_upstream(
+        "http://gms", asset, "billing_invoices", upstream_reader=fake_reader
+    )
+    assert ok, detail
+    assert calls == [("http://gms", asset)]
+    assert receipt["tool"] == "get_lineage"
+    assert receipt["transport"] == "mcp"
+    assert receipt["asset_urn"] == asset
+    assert receipt["upstream_urn"] == billing
+
+    def boom(gms_url, asset_urn):
+        raise RuntimeError("mcp server unavailable")
+
+    ok2, detail2, receipt2 = lineage_verified_upstream(
+        "http://gms", asset, "billing_invoices", upstream_reader=boom
+    )
+    assert not ok2
+    assert "refused" in detail2
+    assert receipt2.get("error")
+
+
+_ASSET_URN = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+              "fiction_retail.fct_payments,PROD)")
+_BILLING_URN = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+                "fiction_retail.billing_invoices,PROD)")
+
+
+def test_lineage_gate_refuses_without_upstream_edge():
+    """The declared source corroborates only when MCP reports it as an
+    upstream; absence refuses (fail-closed)."""
+    from notary.run import lineage_verified_upstream
+
+    ok, detail, receipt = lineage_verified_upstream(
+        "http://gms", _ASSET_URN, "billing_invoices",
+        upstream_reader=lambda g, a: [],
+    )
+    assert not ok and "refused" in detail
+    assert receipt["upstreams_seen"] == 0
+
+
+def test_lineage_gate_rejects_self_reference_and_qualified_names():
+    """A reference resolving to the suspect itself is refused even when the
+    catalog reports a self-edge; a qualified reference name is used
+    verbatim; an unqualified suspect name gets no invented prefix."""
+    from notary.run import lineage_verified_upstream
+
+    ok, detail, _ = lineage_verified_upstream(
+        "http://gms", _ASSET_URN, "fct_payments",
+        upstream_reader=lambda g, a: [_ASSET_URN],
+    )
+    assert not ok and "suspect asset itself" in detail
+
+    qualified = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+                 "other_db.billing,PROD)")
+    ok2, detail2, _ = lineage_verified_upstream(
+        "http://gms", _ASSET_URN, "other_db.billing",
+        upstream_reader=lambda g, a: [qualified],
+    )
+    assert ok2, detail2
+
+    bare_urn = "urn:li:dataset:(urn:li:dataPlatform:duckdb,payments,PROD)"
+    bare_ref = "urn:li:dataset:(urn:li:dataPlatform:duckdb,billing,PROD)"
+    ok3, detail3, _ = lineage_verified_upstream(
+        "http://gms", bare_urn, "billing",
+        upstream_reader=lambda g, a: [bare_ref],
+    )
+    assert ok3, detail3
+
+
+def test_lineage_gate_refuses_on_possible_truncation():
+    """PR #11 truncation lesson carried to MCP: get_lineage returns a
+    BOUNDED result set, so 'not found' in a full page is indistinguishable
+    from 'truncated'. That must refuse with a truncation-specific reason,
+    never a confident 'not an upstream'."""
+    from notary.catalog import LINEAGE_MAX_RESULTS
+    from notary.run import lineage_verified_upstream
+
+    full_page = [
+        f"urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.up{i},PROD)"
+        for i in range(LINEAGE_MAX_RESULTS)
+    ]
+    ok, detail, receipt = lineage_verified_upstream(
+        "http://gms", _ASSET_URN, "billing_invoices",
+        upstream_reader=lambda g, a: full_page,
+    )
+    assert not ok
+    assert "truncat" in detail.lower()
+    assert "truncat" in (receipt.get("error") or "").lower()
+
+
+def test_upstream_parser_ignores_downstream_subtree(monkeypatch):
+    """PR #12 bot finding, adjudicated: mcp-server-datahub 0.6.0 has no
+    `downstream` argument (it derives downstream = not upstream), and a
+    live reverse-direction probe confirmed no leakage today. But parsing
+    the WHOLE payload would leak if a future version ever returned both
+    directions in one response, and this gate authorizes catalog
+    rewrites. So the parser reads ONLY the upstreams subtree."""
+    import json
+
+    import notary.catalog as cat
+
+    asset = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+             "fiction_retail.fct_payments,PROD)")
+    good = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+            "fiction_retail.billing_invoices,PROD)")
+    bad = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+           "fiction_retail.reporting_mart,PROD)")
+    payload = {
+        "upstreams": {"searchResults": [{"entity": {"urn": good}}]},
+        "downstreams": {"searchResults": [{"entity": {"urn": bad}}]},
+    }
+
+    class _Block:
+        text = json.dumps(payload)
+
+    class _Res:
+        isError = False
+        content = [_Block()]
+
+    class _Session:
+        async def call_tool(self, name, args):
+            assert name == "get_lineage"
+            assert args["upstream"] is True
+            return _Res()
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(cat.NotaryWriter, "_session", lambda self: _Ctx())
+    urns = cat.mcp_upstream_urns("http://gms", asset)
+    assert urns == [good], urns
+    assert bad not in urns
+
+
+def test_truncation_is_detected_on_the_raw_count_not_the_filtered_one(monkeypatch):
+    """Self-review finding (PR #12): the parser dedupes and drops the
+    asset's own urn BEFORE the gate counts. A truncated full page that
+    contains a duplicate or a self-edge therefore arrives under the cap
+    and slips past truncation detection, letting the gate conclude
+    'not an upstream' from a list that was actually cut short. Truncation
+    must be judged on what the SERVER returned."""
+    import json
+
+    import notary.catalog as cat
+
+    asset = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+             "fiction_retail.fct_payments,PROD)")
+    # a full page: asset self-edge + duplicate + fillers == LINEAGE_MAX_RESULTS
+    raw = [asset, asset] + [
+        f"urn:li:dataset:(urn:li:dataPlatform:duckdb,fiction_retail.up{i},PROD)"
+        for i in range(cat.LINEAGE_MAX_RESULTS - 2)
+    ]
+    assert len(raw) == cat.LINEAGE_MAX_RESULTS
+    payload = {"upstreams": {"searchResults": [
+        {"entity": {"urn": u}} for u in raw
+    ]}}
+
+    class _Block:
+        text = json.dumps(payload)
+
+    class _Res:
+        isError = False
+        content = [_Block()]
+
+    class _Session:
+        async def call_tool(self, name, args):
+            return _Res()
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(cat.NotaryWriter, "_session", lambda self: _Ctx())
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="truncat"):
+        cat.mcp_upstream_urns("http://gms", asset)
+
+
+def _lineage_session(monkeypatch, payload):
+    """Install a fake MCP session returning `payload` from get_lineage,
+    capturing the tool arguments for assertion."""
+    import json
+
+    import notary.catalog as cat
+
+    seen = {}
+
+    class _Block:
+        text = json.dumps(payload)
+
+    class _Res:
+        isError = False
+        content = [_Block()]
+
+    class _Session:
+        async def call_tool(self, name, args):
+            seen["name"], seen["args"] = name, args
+            return _Res()
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(cat.NotaryWriter, "_session", lambda self: _Ctx())
+    return seen
+
+
+_ASSET_U = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+            "fiction_retail.fct_payments,PROD)")
+_BILL_U = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+           "fiction_retail.billing_invoices,PROD)")
+
+
+def test_upstreams_come_from_searchResults_entities_only(monkeypatch):
+    """Grok review Finding 1: scraping every urn under `upstreams` proves
+    only 'this string appeared somewhere', not 'the server reported this
+    as an upstream edge'. A dataset urn sitting in facets or any other
+    sibling structure must NEVER be accepted as corroborating evidence."""
+    import notary.catalog as cat
+
+    decoy = ("urn:li:dataset:(urn:li:dataPlatform:duckdb,"
+             "fiction_retail.unrelated_mart,PROD)")
+    payload = {"upstreams": {
+        "total": 1,
+        "hasMore": False,
+        "searchResults": [{"entity": {"urn": _BILL_U}, "degree": 1}],
+        "facets": [{"field": "x", "aggregations": [
+            {"value": decoy, "entity": {"urn": decoy}}
+        ]}],
+    }}
+    _lineage_session(monkeypatch, payload)
+    urns = cat.mcp_upstream_urns("http://gms", _ASSET_U)
+    assert urns == [_BILL_U], urns
+    assert decoy not in urns
+
+
+def test_server_hasMore_flag_refuses_as_truncated(monkeypatch):
+    """The server reports truncation explicitly via `hasMore`. That is
+    authoritative and must refuse even when few results came back, where
+    a count-based heuristic alone would happily conclude absence."""
+    import notary.catalog as cat
+
+    payload = {"upstreams": {
+        "total": 5000,
+        "hasMore": True,
+        "searchResults": [{"entity": {"urn": _BILL_U}, "degree": 1}],
+    }}
+    _lineage_session(monkeypatch, payload)
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="truncat"):
+        cat.mcp_upstream_urns("http://gms", _ASSET_U)
+
+
+def test_lineage_call_pins_max_hops(monkeypatch):
+    """Grok review Finding 3: max_hops defaults to 1 today but is not
+    pinned; a default change would silently widen what counts as an
+    'upstream'. Pin it at the call site."""
+    import notary.catalog as cat
+
+    payload = {"upstreams": {"total": 0, "hasMore": False, "searchResults": []}}
+    seen = _lineage_session(monkeypatch, payload)
+    cat.mcp_upstream_urns("http://gms", _ASSET_U)
+    assert seen["args"]["max_hops"] == 1
+    assert seen["args"]["upstream"] is True
+
+
+def test_receipt_states_only_what_the_read_enforced():
+    """Grok review Finding 3: an evidence reader must not infer stronger
+    edge semantics than the parser checked. The receipt names the exact
+    path matched, pins the hop bound, and carries an explicit verified
+    flag rather than implying success from the presence of a urn."""
+    from notary.run import lineage_verified_upstream
+
+    ok, _, receipt = lineage_verified_upstream(
+        "http://gms", _ASSET_URN, "billing_invoices",
+        upstream_reader=lambda g, a: [_BILLING_URN],
+    )
+    assert ok
+    assert receipt["verified"] is True
+    assert receipt["matched_via"] == "upstreams.searchResults[].entity.urn"
+    assert receipt["max_hops"] == 1
+
+    ok2, _, receipt2 = lineage_verified_upstream(
+        "http://gms", _ASSET_URN, "billing_invoices",
+        upstream_reader=lambda g, a: [],
+    )
+    assert not ok2
+    # a refusal must never look verified
+    assert receipt2["verified"] is False
+    assert "upstream_urn" not in receipt2
+
+
+def test_malformed_search_result_entry_invalidates_the_whole_read(monkeypatch):
+    """Codex P1 on the head commit: silently skipping a malformed entry and
+    returning the rest lets a PARTIALLY VALID payload authorize a
+    CONTRADICTED verdict. In a fail-closed gate an unparseable entry must
+    invalidate the entire read."""
+    import notary.catalog as cat
+    import pytest as _pytest
+
+    for bad in (None, "not-an-object", {"entity": None},
+                {"entity": {"urn": 12345}}, {"no_entity": True}):
+        payload = {"upstreams": {
+            "total": 2, "hasMore": False,
+            "searchResults": [{"entity": {"urn": _BILL_U}, "degree": 1}, bad],
+        }}
+        _lineage_session(monkeypatch, payload)
+        with _pytest.raises(RuntimeError, match="malformed"):
+            cat.mcp_upstream_urns("http://gms", _ASSET_U)
+
+
+def test_wellformed_non_dataset_entity_is_skipped_not_refused(monkeypatch):
+    """The same tool returns lineage for charts, dashboards, and schema
+    fields. Those entries are WELL FORMED, merely not datasets, so they
+    must be skipped rather than invalidating an otherwise valid read (a
+    blanket refusal here would break legitimate mixed-entity lineage)."""
+    import notary.catalog as cat
+
+    payload = {"upstreams": {
+        "total": 2, "hasMore": False,
+        "searchResults": [
+            {"entity": {"urn": _BILL_U}, "degree": 1},
+            {"entity": {"urn": "urn:li:chart:(looker,dashboard_elem_1)"}},
+        ],
+    }}
+    _lineage_session(monkeypatch, payload)
+    urns = cat.mcp_upstream_urns("http://gms", _ASSET_U)
+    assert urns == [_BILL_U], urns

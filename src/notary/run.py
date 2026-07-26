@@ -33,7 +33,13 @@ from pathlib import Path
 import duckdb
 
 from notary.adjudicate import adjudicate
-from notary.catalog import NOTARY_RUN_DATE_ENV, NotaryWriter, read_descriptions
+from notary.catalog import (
+    NOTARY_RUN_DATE_ENV,
+    NotaryWriter,
+    LINEAGE_MAX_RESULTS,
+    mcp_upstream_urns,
+    read_descriptions,
+)
 from notary.demo.seeder import DEFAULT_SEED, build_warehouse
 from notary.extract import AnthropicLLM, ReplayLLM, extract_claims
 from notary.incidents import (
@@ -77,23 +83,43 @@ def receipt_ok(receipt: dict) -> bool:
 
 
 def lineage_verified_upstream(
-    gms_url: str, asset_urn: str, reference_table: str
-) -> tuple[bool, str]:
+    gms_url: str, asset_urn: str, reference_table: str, upstream_reader=None
+) -> tuple[bool, str, dict]:
     """A declared reconciliation source earns trust only when the catalog
     itself records it as an UPSTREAM of the suspect asset (judge-slice
     v3): an arbitrary or self-referential table name must not corroborate
-    a contradiction. Fail-closed: any query error or an absent edge
-    refuses."""
-    import json as _json
+    a contradiction. Fail-closed: any read error or an absent edge
+    refuses.
+
+    Judge-slice v4: the read goes through the STOCK DataHub MCP
+    `get_lineage` tool (`upstream_reader`, injectable for tests), so the
+    verdict gate is load-bearing MCP rather than a side channel, and the
+    returned RECEIPT (tool, transport, asset, matched upstream) travels
+    into the evidence dossier as proof of how the gate was satisfied."""
     import re as _re
-    import urllib.request as _request
+
+    reader = upstream_reader or mcp_upstream_urns
+    # The receipt states exactly what the read enforced, no more (review
+    # finding: an evidence reader must not infer stronger edge semantics
+    # than the parser actually checked).
+    receipt: dict = {
+        "tool": "get_lineage",
+        "transport": "mcp",
+        "asset_urn": asset_urn,
+        "reference_table": reference_table,
+        "matched_via": "upstreams.searchResults[].entity.urn",
+        "max_hops": 1,
+        "max_results": LINEAGE_MAX_RESULTS,
+        "verified": False,
+    }
 
     m = _re.match(
         r"urn:li:dataset:\(urn:li:dataPlatform:([^,]+),([^,]+),([A-Z]+)\)$",
         asset_urn,
     )
     if not m:
-        return False, f"refused: cannot parse asset urn {asset_urn!r}"
+        receipt["error"] = f"cannot parse asset urn {asset_urn!r}"
+        return False, f"refused: cannot parse asset urn {asset_urn!r}", receipt
     platform, name, env = m.groups()
     # A qualified reference name is taken as-is; a bare one inherits the
     # suspect's schema prefix, and a prefix exists only when the suspect
@@ -108,46 +134,47 @@ def lineage_verified_upstream(
     ref_urn = (
         f"urn:li:dataset:(urn:li:dataPlatform:{platform},{ref_name},{env})"
     )
+    receipt["expected_upstream_urn"] = ref_urn
     if ref_urn == asset_urn:
         # A self-edge in the catalog proves nothing about independence
         # (PR #11 finding): the suspect can never corroborate itself.
-        return False, "refused: reference resolves to the suspect asset itself"
-    query = (
-        "query($urn:String!,$start:Int!){ dataset(urn:$urn){ lineage(input:{"
-        "direction:UPSTREAM,start:$start,count:100}){ total relationships{"
-        " entity{ urn } } } } }"
-    )
-    start = 0
-    for _ in range(20):  # bound: 2000 upstream relationships
-        payload = _json.dumps(
-            {"query": query, "variables": {"urn": asset_urn, "start": start}}
-        ).encode()
-        req = _request.Request(
-            f"{gms_url}/api/graphql", data=payload,
-            headers={"Content-Type": "application/json"},
+        receipt["error"] = "reference resolves to the suspect asset itself"
+        return (
+            False,
+            "refused: reference resolves to the suspect asset itself",
+            receipt,
         )
-        try:
-            with _request.urlopen(req, timeout=15) as resp:
-                out = _json.loads(resp.read())
-            if out.get("errors"):
-                return False, (
-                    f"refused: lineage query errors {str(out['errors'])[:120]}"
-                )
-            lineage = (((out.get("data") or {}).get("dataset") or {})
-                       .get("lineage") or {})
-            rels = lineage.get("relationships") or []
-            upstreams = {((r or {}).get("entity") or {}).get("urn")
-                         for r in rels}
-        except Exception as e:
-            return False, f"refused: lineage query failed ({str(e)[:120]})"
-        if ref_urn in upstreams:
-            return True, f"lineage-verified upstream: {ref_urn}"
-        start += len(rels)
-        if not rels or start >= int(lineage.get("total") or 0):
-            break
-    return False, (
+    try:
+        upstreams = reader(gms_url, asset_urn)
+    except Exception as e:
+        # A failed MCP read is a REFUSAL, never "no upstreams"
+        # (fail-closed): the gate cannot be satisfied by an absent answer.
+        receipt["error"] = f"mcp get_lineage failed: {str(e)[:160]}"
+        return False, f"refused: mcp get_lineage failed ({str(e)[:120]})", receipt
+    receipt["upstreams_seen"] = len(upstreams)
+    if ref_urn in upstreams:
+        receipt["upstream_urn"] = ref_urn
+        receipt["verified"] = True
+        return True, f"lineage-verified upstream via MCP: {ref_urn}", receipt
+    if len(upstreams) >= LINEAGE_MAX_RESULTS:
+        # A full page is indistinguishable from a truncated one, so absence
+        # here is NOT evidence of absence (PR #11 truncation lesson).
+        receipt["error"] = (
+            f"mcp get_lineage may be truncated at {LINEAGE_MAX_RESULTS} "
+            f"upstreams; refusing to conclude absence"
+        )
+        return (
+            False,
+            f"refused: mcp get_lineage possibly truncated at "
+            f"{LINEAGE_MAX_RESULTS} upstreams; cannot conclude absence",
+            receipt,
+        )
+    receipt["error"] = "declared reference is not a catalog-verified upstream"
+    return (
+        False,
         f"refused: {reference_table} is not a catalog-verified upstream "
-        f"of the asset"
+        f"of the asset",
+        receipt,
     )
 
 
@@ -401,8 +428,9 @@ def main(argv: list[str] | None = None) -> int:
                 MANIFEST.reconciliations.get((table, claim.field_path))
                 if args.demo else reconcile_map.get(claim.field_path)
             )
+            lineage_receipt = None
             if recon is not None:
-                ok, detail = lineage_verified_upstream(
+                ok, detail, lineage_receipt = lineage_verified_upstream(
                     args.gms, args.asset, recon.table
                 )
                 print(
@@ -412,9 +440,15 @@ def main(argv: list[str] | None = None) -> int:
                 if not ok:
                     recon = None
                     recon_refusals += 1
-            findings.append(adjudicate(claim, run_probe(plan_probe(
+            finding = adjudicate(claim, run_probe(plan_probe(
                 claim, as_of=run_date, reconciliation=recon,
-            ), con)))
+            ), con))
+            # The MCP receipt travels into the evidence so a reader can see
+            # HOW the gate was satisfied (or why it refused), not just the
+            # verdict (judge-slice v4).
+            if lineage_receipt is not None:
+                finding.evidence["lineage_gate"] = lineage_receipt
+            findings.append(finding)
     finally:
         con.close()
 

@@ -22,9 +22,18 @@ authority. The context platform needs a verification layer; Notary is that layer
 
 ## Core loop (domain language)
 
-1. **Read** an asset's claims from the catalog (via MCP): free-text description
-   claims, freshness statements, deprecation flags, ownership, schema field
-   descriptions.
+1. **Read** an asset's claims from the catalog: free-text description claims,
+   freshness statements, deprecation flags, ownership, schema field
+   descriptions. Transports are named exactly, because a verification tool
+   must not misstate its own plumbing: description and incident reads use
+   DataHub GraphQL (the OSS surface carrying field-level description and
+   incident fidelity), and the verdict-gating **lineage read goes through the
+   stock DataHub MCP `get_lineage` tool**, so the same agent that writes
+   through MCP also reads its gating evidence through MCP. That MCP read is
+   load-bearing: it decides whether a declared reconciliation source may
+   corroborate a contradiction at all, its receipt is written into the
+   evidence dossier, and any failure, self-reference, or possibly-truncated
+   result refuses (fail-closed) rather than downgrading to another transport.
 2. **Extract** discrete, testable claims (LLM, deterministic settings, bounded to
    the five claim types below).
 3. **Probe** measured reality for each claim (deterministic SQL profiling against

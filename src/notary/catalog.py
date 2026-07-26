@@ -97,6 +97,133 @@ _DUCK_TO_SQL = {
 }
 
 
+# Upper bound on upstreams read from the MCP get_lineage tool in one
+# call. The tool returns a BOUNDED set, so a full page means "there may be
+# more" and the caller must refuse rather than conclude absence (the PR #11
+# search-truncation lesson, carried to the MCP transport).
+LINEAGE_MAX_RESULTS = 200
+
+
+def mcp_upstream_urns(gms_url: str, asset_urn: str) -> list[str]:
+    """Upstream dataset urns for an asset, read through the STOCK DataHub
+    MCP `get_lineage` tool (judge-slice v4: the verdict-gating read is
+    load-bearing MCP, not a side channel, so the same agent that writes
+    through MCP also reads its gating evidence through it).
+
+    Raises on any transport, tool, or parse failure: the caller treats a
+    failed read as a refusal, never as "no upstreams" (fail-closed)."""
+    import asyncio
+    import json as _json
+
+    async def _read() -> list[str]:
+        writer = NotaryWriter(gms_url)
+        async with writer._session() as session:
+            res = await session.call_tool(
+                "get_lineage",
+                {
+                    "urn": asset_urn,
+                    "upstream": True,
+                    "max_results": LINEAGE_MAX_RESULTS,
+                    # pinned: the default is 1 today, and a server-side
+                    # default change would silently widen what counts as
+                    # an "upstream" for a gate that authorizes rewrites
+                    "max_hops": 1,
+                },
+            )
+            if getattr(res, "isError", False):
+                raise RuntimeError(f"get_lineage returned an error for {asset_urn}")
+            # The tool returns content blocks; urns are parsed from the
+            # payload text rather than a fixed shape, so a schema change
+            # degrades to "no match" (refusal), never a false positive.
+            text = "".join(
+                getattr(c, "text", "") or "" for c in (res.content or [])
+            )
+            if not text.strip():
+                raise RuntimeError(f"get_lineage returned no content for {asset_urn}")
+            urns: list[str] = []
+            try:
+                payload = _json.loads(text)
+            except _json.JSONDecodeError as e:
+                # An unparseable payload is a REFUSAL, not an empty result:
+                # regex-scraping the whole blob cannot tell an upstream from
+                # a downstream, and this gate authorizes catalog rewrites.
+                raise RuntimeError(
+                    f"get_lineage returned unparseable content for "
+                    f"{asset_urn}: {str(e)[:120]}"
+                ) from e
+            # Direction-explicit: walk ONLY the upstreams subtree. Parsing
+            # the whole payload would silently accept a DOWNSTREAM urn as
+            # corroborating evidence if a future server version returned
+            # both directions in one response (PR #12 bot finding; 0.6.0
+            # derives downstream = not upstream, so it does not today).
+            root = payload.get("upstreams") if isinstance(payload, dict) else None
+            if not isinstance(root, dict):
+                raise RuntimeError(
+                    f"get_lineage response carried no 'upstreams' section "
+                    f"for {asset_urn}"
+                )
+            # STRUCTURAL, not a scrape (review finding): read the entity urn
+            # of each declared search result. Scraping every urn-shaped
+            # string under `upstreams` would prove only "this appeared
+            # somewhere in the payload", so a urn sitting in facets or any
+            # future sibling structure could be accepted as an upstream edge.
+            results = root.get("searchResults")
+            if not isinstance(results, list):
+                raise RuntimeError(
+                    f"get_lineage 'upstreams' carried no searchResults list "
+                    f"for {asset_urn}"
+                )
+            # A MALFORMED entry invalidates the whole read (review finding):
+            # skipping it would let a partially valid payload authorize a
+            # contradiction. A WELL-FORMED entry that simply is not a dataset
+            # (this tool also returns charts, dashboards, and schema fields)
+            # is skipped, since refusing on those would break legitimate
+            # mixed-entity lineage.
+            for position, entry in enumerate(results):
+                if not isinstance(entry, dict):
+                    raise RuntimeError(
+                        f"get_lineage searchResults[{position}] is malformed "
+                        f"({type(entry).__name__}) for {asset_urn}; refusing "
+                        f"a partially valid lineage read"
+                    )
+                entity = entry.get("entity")
+                if not isinstance(entity, dict):
+                    raise RuntimeError(
+                        f"get_lineage searchResults[{position}] is malformed: no "
+                        f"entity object for {asset_urn}; refusing a partially "
+                        f"valid lineage read"
+                    )
+                urn = entity.get("urn")
+                if not isinstance(urn, str) or not urn.startswith("urn:li:"):
+                    raise RuntimeError(
+                        f"get_lineage searchResults[{position}] is malformed: no "
+                        f"usable entity urn for {asset_urn}; refusing a "
+                        f"partially valid lineage read"
+                    )
+                if urn.startswith("urn:li:dataset:"):
+                    urns.append(urn)
+            # Truncation: the server states it explicitly via hasMore, which
+            # is authoritative. The raw-count check stays as a backstop, and
+            # is judged BEFORE dedupe and self-exclusion (a full page holding
+            # a duplicate or self-edge would otherwise slip under the cap).
+            if root.get("hasMore") is True:
+                raise RuntimeError(
+                    f"get_lineage reported hasMore=true for {asset_urn} "
+                    f"(total={root.get('total')!r}); the upstream list is "
+                    f"truncated, refusing to conclude absence"
+                )
+            if len(urns) >= LINEAGE_MAX_RESULTS:
+                raise RuntimeError(
+                    f"get_lineage returned {len(urns)} upstream urns at the "
+                    f"{LINEAGE_MAX_RESULTS} cap for {asset_urn}; the result "
+                    f"may be truncated, refusing to conclude absence"
+                )
+            # never let the asset itself count as its own upstream
+            return [u for u in dict.fromkeys(urns) if u != asset_urn]
+
+    return asyncio.run(_read())
+
+
 def _merged_upstreams(
     existing: "list[str]", declared: "list[str]",
 ) -> list[str]:

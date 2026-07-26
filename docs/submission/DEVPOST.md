@@ -73,7 +73,10 @@ probes, adjudicates, and scores every entry. The result table is published
 verbatim in the README, misses included, and a test fails if the README
 table drifts from the command's output:
 
-12 planted lies: 9 caught, 3 missed, 0 false positives.
+12 planted lies: 9 caught, 3 missed, 0 false positives, across 6 adjudicated
+truthful controls (two of which are adversaries built against our own
+flagship: a legitimate whole-dollar column that matches the cents signature,
+and a self-referential reconciliation declaration; both must earn nothing).
 
 The three misses are declared, not pending: a 0-to-1 distribution is
 scale-ambiguous by design (a stored fraction and legitimate sub-1-percent
@@ -107,7 +110,7 @@ step, no API key needed): the Quick start section of the README.
   tests and the demo, so the pipeline is deterministic where stability
   matters.
 - Deterministic probes and pure rubrics; every verdict carries its evidence.
-- 119 tests (8 are live integration round-trips against the quickstart,
+- 157 tests (10 are live integration round-trips against the quickstart,
   skipped when no quickstart is running): write-back, incident lifecycle,
   and the next-agent flip, plus a test that pins the README table and one
   that byte-compares the checked-in replay payload the host serves to a
