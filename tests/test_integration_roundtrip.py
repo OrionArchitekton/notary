@@ -159,17 +159,24 @@ def test_lineage_registers_billing_as_upstream_of_payments(ingested):
     reconciliation gate verifies exactly that edge."""
     from notary.run import lineage_verified_upstream
 
-    ok, detail = lineage_verified_upstream(
+    ok, detail, receipt = lineage_verified_upstream(
         GMS, PAYMENTS_URN, "billing_invoices"
     )
     assert ok, detail
     assert "billing_invoices" in detail
+    # judge-slice v4: the gate is satisfied by a LIVE read through the stock
+    # MCP get_lineage tool, and the receipt proves which tool answered
+    assert receipt["transport"] == "mcp"
+    assert receipt["tool"] == "get_lineage"
+    assert receipt["upstream_urn"].endswith("billing_invoices,PROD)")
+    assert receipt["asset_urn"] == PAYMENTS_URN
     # a self-referential or unrelated source is refused by the same gate
-    ok2, detail2 = lineage_verified_upstream(
+    ok2, detail2, receipt2 = lineage_verified_upstream(
         GMS, PAYMENTS_URN, "stg_service_fees"
     )
     assert not ok2
     assert "refused" in detail2
+    assert receipt2.get("error")
 
 
 def test_incident_raise_and_resolve_round_trip(ingested, tmp_path):

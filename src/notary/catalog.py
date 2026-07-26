@@ -97,6 +97,68 @@ _DUCK_TO_SQL = {
 }
 
 
+# Upper bound on upstreams read from the MCP get_lineage tool in one
+# call. The tool returns a BOUNDED set, so a full page means "there may be
+# more" and the caller must refuse rather than conclude absence (the PR #11
+# search-truncation lesson, carried to the MCP transport).
+LINEAGE_MAX_RESULTS = 200
+
+
+def mcp_upstream_urns(gms_url: str, asset_urn: str) -> list[str]:
+    """Upstream dataset urns for an asset, read through the STOCK DataHub
+    MCP `get_lineage` tool (judge-slice v4: the verdict-gating read is
+    load-bearing MCP, not a side channel, so the same agent that writes
+    through MCP also reads its gating evidence through it).
+
+    Raises on any transport, tool, or parse failure: the caller treats a
+    failed read as a refusal, never as "no upstreams" (fail-closed)."""
+    import asyncio
+    import json as _json
+    import re as _re
+
+    async def _read() -> list[str]:
+        writer = NotaryWriter(gms_url)
+        async with writer._session() as session:
+            res = await session.call_tool(
+                "get_lineage",
+                {
+                    "urn": asset_urn,
+                    "upstream": True,
+                    "max_results": LINEAGE_MAX_RESULTS,
+                },
+            )
+            if getattr(res, "isError", False):
+                raise RuntimeError(f"get_lineage returned an error for {asset_urn}")
+            # The tool returns content blocks; urns are parsed from the
+            # payload text rather than a fixed shape, so a schema change
+            # degrades to "no match" (refusal), never a false positive.
+            text = "".join(
+                getattr(c, "text", "") or "" for c in (res.content or [])
+            )
+            if not text.strip():
+                raise RuntimeError(f"get_lineage returned no content for {asset_urn}")
+            urns: list[str] = []
+            try:
+                payload = _json.loads(text)
+                stack = [payload]
+                while stack:
+                    node = stack.pop()
+                    if isinstance(node, dict):
+                        stack.extend(node.values())
+                    elif isinstance(node, list):
+                        stack.extend(node)
+                    elif isinstance(node, str) and node.startswith(
+                        "urn:li:dataset:"
+                    ):
+                        urns.append(node)
+            except _json.JSONDecodeError:
+                urns = _re.findall(r"urn:li:dataset:\([^)]*\)", text)
+            # never let the asset itself count as its own upstream
+            return [u for u in dict.fromkeys(urns) if u != asset_urn]
+
+    return asyncio.run(_read())
+
+
 def _merged_upstreams(
     existing: "list[str]", declared: "list[str]",
 ) -> list[str]:

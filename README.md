@@ -14,8 +14,11 @@ true.
 Notary reads an asset's live descriptions from [DataHub](https://datahub.com)
 (GraphQL), probes the warehouse with deterministic SQL, and adjudicates every
 extracted claim: **CONFIRMED**, **CONTRADICTED**, or **UNVERIFIABLE**, with
-evidence. Then it writes back what it learned through the DataHub MCP Server,
-so the next agent inherits verified context:
+evidence. The verdict-gating **lineage read runs through the stock DataHub MCP
+Server** (`get_lineage`): it decides whether a declared reconciliation source
+may corroborate a contradiction at all, and its receipt is written into the
+evidence dossier. Then it writes back what it learned through the same MCP
+Server, so the next agent inherits verified context:
 
 - a **trust ledger** on the asset (structured properties: verdict, verified-at,
   evidence link)
@@ -58,6 +61,14 @@ Feature-complete: all seven scenarios of the governing spec
 suite; 10 tests are live DataHub integration round-trips (skipped without a
 local quickstart), the rest are deterministic replay and evaluation tests.
 Built for the DataHub Agent Hackathon (submission window through 2026-08-10).
+
+**What CI proves, stated precisely.** Public CI runs the complete
+deterministic suite and reproduces the evaluation table on every push. It does
+NOT start a DataHub quickstart, so the 10 live integration round-trips SKIP
+there; they are validated separately against a local quickstart and the result
+is recorded in [docs/live-test-receipt.md](docs/live-test-receipt.md). A green
+badge therefore means "deterministic suite and eval table reproduce", not "the
+live round-trips ran".
 
 ## Honest evaluation
 
